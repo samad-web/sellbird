@@ -20,6 +20,8 @@ import aiosqlite
 
 from sellbird.models.company import Company
 from sellbird.models.prospect import Prospect
+from sellbird.phone import is_e164
+from sellbird.phone import normalize as normalize_phone
 from sellbird.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from sellbird.models.conversation import Conversation, Message  # noqa: F401
 
@@ -566,6 +568,24 @@ MIGRATIONS: list[str] = [
     ALTER TABLE conversations ADD COLUMN mailbox_id TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_outbox_mailbox_sent ON outbox(mailbox_id, status, sent_at);
     """,
+    # ── v17: which channel an outbox row belongs to ──
+    # 'email' (every existing row, and the default) or 'whatsapp'. The whole
+    # ladder — approval, the pre-send gate, the claim, stop-on-reply,
+    # suppressions — is shared; only the provider and the recipient's shape
+    # differ, so a channel is a column rather than a second pipeline.
+    # to_email holds the recipient either way: an address, or an E.164 number.
+    # conversations already has a channel column, from v1.
+    # prospects.phone_e164 is the phone normalised once, on write, so an
+    # inbound WhatsApp message finds its prospect by an exact indexed match.
+    # prospects.phone keeps whatever the listing published, for a human to
+    # read. A reply must never be attributed by guesswork.
+    """
+    ALTER TABLE outbox ADD COLUMN channel TEXT DEFAULT 'email';
+    ALTER TABLE prospects ADD COLUMN phone_e164 TEXT DEFAULT '';
+    CREATE INDEX IF NOT EXISTS idx_outbox_channel_status
+      ON outbox(channel, status, send_at);
+    CREATE INDEX IF NOT EXISTS idx_prospects_phone_e164 ON prospects(phone_e164);
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -821,17 +841,18 @@ class StateManager:
             cursor = await db.execute(
                 """INSERT OR IGNORE INTO prospects
                    (id, company_id, first_name, last_name, email, email_verified,
-                    email_status, phone, phone_verified, linkedin_url, title,
+                    email_status, phone, phone_verified, phone_e164, linkedin_url, title,
                     seniority, department, source, source_url, status, score,
                     personalization_notes, company, industry, company_size,
                     created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     prospect.id, prospect.company_id,
                     prospect.first_name, prospect.last_name,
                     prospect.email, int(prospect.email_verified),
                     prospect.email_status,
                     prospect.phone, int(prospect.phone_verified),
+                    normalize_phone(prospect.phone),
                     prospect.linkedin_url, prospect.title,
                     prospect.seniority, prospect.department,
                     prospect.source, prospect.source_url,
@@ -984,6 +1005,65 @@ class StateManager:
                 row = await cursor.fetchone()
                 return self._prospect_from_row(row) if row else None
 
+    async def get_prospect_by_phone(self, number: str) -> Prospect | None:
+        """The prospect reachable on this number, by exact E.164 match.
+
+        An inbound WhatsApp message is attributed with this, so it matches on
+        the normalised column rather than guessing from digit suffixes: two
+        people can share the last nine digits of a number, and crediting a
+        reply to the wrong prospect would stop the wrong sequence.
+        """
+        wanted = normalize_phone(number) or (str(number or "").strip()
+                                             if is_e164(number) else "")
+        if not wanted:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM prospects WHERE phone_e164 = ?", (wanted,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return self._prospect_from_row(row) if row else None
+
+    async def set_prospect_phone(self, prospect_id: str, raw: str,
+                                 default_code: str = "", verified: bool | None = None) -> str:
+        """Store a prospect's phone and its E.164 form. Returns the E.164
+        form, or "" when the number could not be normalised (in which case
+        the raw value is still kept, for a human to look at)."""
+        e164 = normalize_phone(raw, default_code)
+        sets = "phone = ?, phone_e164 = ?, updated_at = ?"
+        params: list = [str(raw or "").strip(), e164, _utcnow().isoformat()]
+        if verified is not None:
+            sets += ", phone_verified = ?"
+            params.append(int(verified))
+        params.append(prospect_id)
+        async with self._connect() as db:
+            await db.execute(f"UPDATE prospects SET {sets} WHERE id = ?", params)
+            await db.commit()
+        return e164
+
+    async def backfill_phone_e164(self, default_code: str = "") -> int:
+        """Fill phone_e164 for prospects added before the column existed, or
+        whose number only resolves now that a default dialling code is set.
+        Returns how many were filled."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, phone FROM prospects "
+                "WHERE COALESCE(phone, '') != '' AND COALESCE(phone_e164, '') = ''"
+            ) as cursor:
+                rows = [dict(r) for r in await cursor.fetchall()]
+            filled = 0
+            for row in rows:
+                e164 = normalize_phone(row["phone"], default_code)
+                if not e164:
+                    continue
+                await db.execute("UPDATE prospects SET phone_e164 = ? WHERE id = ?",
+                                 (e164, row["id"]))
+                filled += 1
+            await db.commit()
+        return filled
+
     async def update_prospect_email(
         self, prospect_id: str, email: str, email_status: str
     ):
@@ -1075,23 +1155,27 @@ class StateManager:
         in_reply_to: str = "",
         approved_by: str = "",
         mailbox_id: str = "",
+        channel: str = "email",
     ) -> str | None:
-        """Queue one outgoing email. Returns its id, or None when the
+        """Queue one outgoing message. Returns its id, or None when the
         (campaign, prospect, step) slot already exists — the double-send guard.
         ``approved_by="autopilot"`` when it's queued approved on autopilot.
-        ``mailbox_id`` is the inbox it leaves from ('' = the main mailbox)."""
+        ``mailbox_id`` is the inbox it leaves from ('' = the main mailbox).
+        ``channel`` is 'email' or 'whatsapp'; ``to_email`` holds the recipient
+        either way — an address, or an E.164 number."""
         item_id = _new_id()
         async with self._connect() as db:
             cursor = await db.execute(
                 """INSERT OR IGNORE INTO outbox
                    (id, campaign_id, prospect_id, conversation_id, step, kind,
                     to_email, subject, body, status, send_at, provider,
-                    thread_ref, in_reply_to, mailbox_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    thread_ref, in_reply_to, mailbox_id, channel)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item_id, campaign_id, prospect_id, conversation_id,
                     int(step), kind, _norm(to_email), subject, body,
                     status, send_at, provider, thread_ref, in_reply_to, mailbox_id or "",
+                    (channel or "email").strip().lower(),
                 ),
             )
             if cursor.rowcount > 0 and approved_by:
@@ -1108,12 +1192,17 @@ class StateManager:
         skip_unready_follow_ups: bool = False,
         kind: str | None = None,
         follow_ups_only: bool = False,
+        channel: str | None = None,
     ) -> list[dict]:
         """skip_unready_follow_ups: leave out sequence follow-ups whose
         previous step hasn't gone out yet, so they can't fill the page.
-        kind: only that kind ("sequence" for cold email).
-        follow_ups_only: only sequence emails after the first step."""
+        kind: only that kind ("sequence" for cold outreach).
+        follow_ups_only: only sequence messages after the first step.
+        channel: only that channel ("email", "whatsapp")."""
         where, params = [], []
+        if channel:
+            where.append("COALESCE(channel, 'email') = ?")
+            params.append(channel)
         if kind:
             where.append("kind = ?")
             params.append(kind)
@@ -1636,10 +1725,13 @@ class StateManager:
 
     async def count_outbox_sent_today(self, kind: str | None = None,
                                       since: str | None = None,
-                                      mailbox_id: str | None = None) -> int:
-        """Emails sent today (the UTC day, or since `since`, a naive UTC
-        ISO time); only one kind ("sequence", "reply") if given, and only
-        from one inbox if `mailbox_id` is given ('' = the main mailbox)."""
+                                      mailbox_id: str | None = None,
+                                      channel: str | None = None) -> int:
+        """Messages sent today (the UTC day, or since `since`, a naive UTC
+        ISO time); only one kind ("sequence", "reply") if given, only from one
+        inbox if `mailbox_id` is given ('' = the main mailbox), and only on one
+        channel if `channel` is given. Without `channel` it counts every
+        channel, which is what the install-wide ceiling wants."""
         if since:
             sql = "SELECT COUNT(*) FROM outbox WHERE status = 'sent' AND sent_at >= ?"
             params: tuple = (since,)
@@ -1653,6 +1745,9 @@ class StateManager:
         if mailbox_id is not None:
             sql += " AND COALESCE(mailbox_id, '') = ?"
             params += (mailbox_id,)
+        if channel:
+            sql += " AND COALESCE(channel, 'email') = ?"
+            params += (channel,)
         async with self._connect() as db:
             async with db.execute(sql, params) as cursor:
                 return (await cursor.fetchone())[0]

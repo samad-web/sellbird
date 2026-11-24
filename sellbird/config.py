@@ -371,9 +371,129 @@ class LinkedInChannelConfig(BaseModel):
     max_daily_messages: int = 10
 
 
+class WhatsAppTemplate(BaseModel):
+    """One Meta-approved template, as Wasi reports it.
+
+    Sellbird keeps its own copy so it can check, before sending, that the
+    text it rendered really is this template with its placeholders filled.
+    Meta rejects a template send whose shape doesn't match what it approved,
+    and a rejected template costs the number's standing.
+    """
+
+    name: str
+    language: str = "en_US"
+    # "Marketing", "Utility" or "Authentication", as Meta categorises it.
+    category: str = ""
+    body: str = ""
+
+    @field_validator("name", "language", "category", "body", mode="before")
+    @classmethod
+    def _text(cls, v):
+        return "" if v is None else str(v).strip()
+
+
+class WhatsAppChannelConfig(BaseModel):
+    """WhatsApp through Wasi (docs/whatsapp.md).
+
+    Off by default. WhatsApp is not email: Meta only allows a first message
+    as a pre-approved template, and unsolicited cold outreach is what gets a
+    number banned. Nothing here runs until `enabled` is set, and cold
+    first-touch needs `cold_first_touch` on top of that.
+    """
+
+    enabled: bool = False
+    provider: str = "wasi"
+    # The ceiling Sellbird applies. The real cap is the lower of this and what
+    # Meta currently allows (GET /account -> messaging_limit.remaining), so
+    # this is a brake, never a licence.
+    max_daily_sends: int = 20
+    # Every message waits in the Outbox for you, as with email.
+    require_approval: bool = True
+    # Open conversations with people who never messaged first. Meta allows it
+    # only as an approved Marketing template, and it is the main way a number
+    # gets blocked and a WhatsApp Business Account lost. Off unless you mean it.
+    cold_first_touch: bool = False
+    # The approved Marketing template a cold opener is sent as, by name.
+    cold_template: str = ""
+    # Sellbird's copy of the approved templates (`sellbird whatsapp templates`
+    # writes it). A send is checked against the entry named here.
+    templates: list[WhatsAppTemplate] = []
+    # Dialling prefix for numbers written the way they'd be dialled locally,
+    # e.g. "+91". A prefix, not an ISO code: see sellbird/phone.py.
+    default_country_code: str = ""
+    # Stop cold WhatsApp when Meta's quality rating for the number is not
+    # GREEN. A falling rating is the warning before a ban.
+    pause_below_green: bool = True
+    # Send cold messages only in the recipient's office hours, as email does.
+    send_window: SendWindowConfig | None = None
+
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _known_provider(cls, v):
+        provider = ("wasi" if v is None else str(v)).strip().lower()
+        if provider != "wasi":
+            raise ValueError(
+                f"channels.whatsapp.provider '{provider}' is not supported. "
+                "Only 'wasi' is."
+            )
+        return provider
+
+    @field_validator("max_daily_sends")
+    @classmethod
+    def _sends_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("channels.whatsapp.max_daily_sends must be >= 0")
+        return v
+
+    @field_validator("default_country_code", mode="before")
+    @classmethod
+    def _dialling_prefix(cls, v):
+        code = "" if v is None else str(v).strip()
+        if not code:
+            return ""
+        if not code.startswith("+"):
+            raise ValueError(
+                f"channels.whatsapp.default_country_code '{code}' must start with '+' "
+                "(it is a dialling prefix such as \"+91\", not a country code)."
+            )
+        if not code[1:].isdigit() or not 1 <= len(code) - 1 <= 4:
+            raise ValueError(
+                f"channels.whatsapp.default_country_code '{code}' is not a dialling "
+                "prefix. Use '+' and 1 to 4 digits, e.g. \"+91\"."
+            )
+        return code
+
+    @field_validator("templates", mode="before")
+    @classmethod
+    def _blank_templates(cls, v):
+        return [] if v is None else v
+
+    @model_validator(mode="after")
+    def _cold_needs_a_template(self):
+        if self.enabled and self.cold_first_touch and not self.cold_template:
+            raise ValueError(
+                "channels.whatsapp.cold_first_touch is on but cold_template is empty. "
+                "Meta only delivers a first message as an approved template: set "
+                "cold_template to the name of an approved Marketing template "
+                "(`sellbird whatsapp templates` lists them)."
+            )
+        return self
+
+    def template(self, name: str) -> WhatsAppTemplate | None:
+        """The stored template by name, or None."""
+        wanted = (name or "").strip().lower()
+        return next((t for t in self.templates if t.name.lower() == wanted), None)
+
+
 class ChannelsConfig(BaseModel):
     email: EmailChannelConfig = EmailChannelConfig()
     linkedin: LinkedInChannelConfig = LinkedInChannelConfig()
+    whatsapp: WhatsAppChannelConfig = WhatsAppChannelConfig()
+
+    @field_validator("whatsapp", mode="before")
+    @classmethod
+    def _blank_whatsapp(cls, v):
+        return WhatsAppChannelConfig() if v is None else v
 
 
 PRECLEARED_ADDRESS_SOURCES = ("published", "bought", "scraped", "given", "unknown")

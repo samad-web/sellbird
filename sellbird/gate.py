@@ -12,6 +12,10 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from sellbird.phone import is_e164, looks_like_phone
+from sellbird.phone import normalize as normalize_phone
+from sellbird.phone import same_number
+
 # Spam-filter and AI-tell phrases that must never appear in outgoing mail.
 # Mirrors prompts/writer.md; enforced here because prompts can be ignored.
 BANNED_PHRASES = (
@@ -28,6 +32,9 @@ BANNED_PHRASES = (
 )
 
 MAX_SUBJECT_LEN = 90
+# WhatsApp: Meta allows 4096 characters. This is the length past which a
+# cold message reads as a wall of text and gets the sender blocked.
+MAX_WHATSAPP_CHARS = 700
 MAX_BODY_WORDS = 220        # hard ceiling; sequences aim far lower
 MAX_LINKS = 1
 
@@ -80,16 +87,27 @@ def _dnc_domain(value: str) -> str:
 
 
 def do_not_contact_entry(raw) -> str:
-    """One do-not-contact entry as an address or a bare domain, or "" when
-    it names neither.
+    """One do-not-contact entry as an address, a bare domain or an E.164
+    phone number, or "" when it names none of those.
 
     People paste what the browser shows, so "https://www.acme.example/about",
     "mailto:jane@acme.example", "*.acme.example", "*@acme.example" and
     "acme.example:443" all reduce to what they name. Left alone, each would
     quietly match nothing. An international domain becomes its ASCII form,
     the one recipient addresses carry.
+
+    A phone number must be written in international form ("+441632960001",
+    spaces and brackets allowed). A local number is refused rather than
+    guessed: "020 7946 0018" names a different line in every country, and an
+    entry that blocks the wrong person is worse than one that errors.
     """
     entry = _clean_text(raw).strip().lower()
+    entry = re.sub(r"^(?:tel|callto|whatsapp|wa):\s*", "", entry)
+    if entry.startswith("+"):
+        # The leading "+" is what makes it a phone number and not a domain:
+        # no address or domain starts with one, and "123.456" would otherwise
+        # be readable as either.
+        return normalize_phone(entry)
     entry = re.sub(r"^(?:[a-z][a-z0-9+.-]*://|mailto:)", "", entry)
     entry = re.split(r"[/?#]", entry, maxsplit=1)[0]
     entry = re.sub(r"^(?:\*@|\*\.|@)", "", entry)
@@ -102,21 +120,43 @@ def do_not_contact_entry(raw) -> str:
     return _dnc_domain(entry)
 
 
+# A phone number in international form, which may carry the spaces and
+# brackets people write it with — so it is lifted out before the separator
+# split tears it into three "entries". The lookbehind keeps it off the
+# plus-tag in an address like "jane+1234567@acme.example".
+_PHONE_ENTRY_RE = re.compile(r"(?<![\w@.])\+[\d\s()./\-]{6,25}\d(?![\w@])")
+
+
 def do_not_contact_entries(raw) -> list[str]:
     """Every entry one configured string holds. Commas, semicolons and spaces
-    separate entries; "Jane Doe <jane@acme.example>" is that address.
-    Raises ValueError for a piece that is neither an address nor a domain:
-    an entry that silently matches nothing leaves the user believing a
-    company is protected when it isn't."""
+    separate entries; "Jane Doe <jane@acme.example>" is that address, and a
+    "+" number keeps its own spaces. Raises ValueError for a piece that is
+    none of an address, a domain or an international phone number: an entry
+    that silently matches nothing leaves the user believing a company is
+    protected when it isn't."""
     text = _clean_text(raw)
-    parts = re.findall(r"<([^<>\s]+@[^<>\s]+)>", text) or re.split(r"[\s,;]+", text)
+    angled = re.findall(r"<([^<>\s]+@[^<>\s]+)>", text)
+    if angled:
+        parts = angled
+    else:
+        phones: list[str] = []
+
+        def _lift(match):
+            phones.append(match.group(0))
+            return " "
+
+        rest = _PHONE_ENTRY_RE.sub(_lift, text)
+        parts = phones + re.split(r"[\s,;]+", rest)
     found = []
     for part in parts:
         if not part.strip():
             continue
         entry = do_not_contact_entry(part)
         if not entry:
-            raise ValueError(f"'{part.strip()}' is not an email address or a domain")
+            raise ValueError(
+                f"'{part.strip()}' is not an email address, a domain, or a phone "
+                "number in international form (+441632960001)"
+            )
         found.append(entry)
     return found
 
@@ -130,11 +170,24 @@ def do_not_contact_match(to_email: str, entries) -> str:
     "mail.acme.example" without also blocking "notacme.example" — a suffix
     test without that boundary is the classic way a blocklist overreaches.
 
+    A recipient that is a phone number (the WhatsApp channel) is matched
+    against the "+" entries only, on the subscriber's digits. Address and
+    domain entries say nothing about a phone number, and vice versa: the
+    same person on the list twice is the user's business, not a bug.
+
     Entries are expected already normalised by ComplianceConfig; this
     normalises anyway so a hand-built tuple behaves the same way.
     """
     address = (to_email or "").strip().lower()
-    if "@" not in address or not entries:
+    if not entries:
+        return ""
+    if "@" not in address and looks_like_phone(address):
+        for raw in entries:
+            entry = do_not_contact_entry(raw)
+            if entry.startswith("+") and same_number(entry, address):
+                return entry
+        return ""
+    if "@" not in address:
         return ""
     local, _, host = address.rpartition("@")
     host = _host(host)
@@ -170,8 +223,8 @@ def do_not_contact_domain_match(domain: str, entries) -> str:
         return ""
     for raw in entries:
         entry = do_not_contact_entry(raw)
-        if not entry or "@" in entry:
-            continue
+        if not entry or "@" in entry or entry.startswith("+"):
+            continue    # addresses and phone numbers name a person, not a company
         if host == entry or host.endswith("." + entry):
             return entry
     return ""
@@ -186,19 +239,32 @@ def pre_send_check(
     kind: str = "sequence",
     postal_address: str = "",
     do_not_contact=(),
+    channel: str = "email",
 ) -> GateResult:
     """Run every deterministic check. Returns ok=False with reasons on any hit.
 
     postal_address: when set, a cold (sequence) email must carry it (CAN-SPAM).
-    do_not_contact: addresses and domains that must never be emailed at all.
+    do_not_contact: addresses, domains and phone numbers never to be contacted.
+    channel: "email", or "whatsapp" for a message going out through Wasi.
+
+    What the channel changes is only what the medium makes different: the
+    recipient is an E.164 number instead of an address, WhatsApp has no
+    subject line, and its length limit is its own. Every other check — the
+    do-not-contact list, unrendered merge tags, banned phrases, the link
+    budget, no HTML — applies to both, because none of them is about email.
     """
     reasons: list[str] = []
     subject = (subject or "").strip()
     body = (body or "").strip()
     to_email = (to_email or "").strip().lower()
+    whatsapp = channel == "whatsapp"
 
     # Recipient sanity
-    if not EMAIL_RE.match(to_email):
+    if whatsapp:
+        if not is_e164(to_email):
+            reasons.append(
+                f"recipient '{to_email}' is not an E.164 phone number (+441632960001)")
+    elif not EMAIL_RE.match(to_email):
         reasons.append(f"invalid recipient address '{to_email}'")
     # Deliberately not limited to kind == "sequence": a reply is still contact,
     # and a list that lets automated replies through is not a do-not-contact
@@ -207,25 +273,38 @@ def pre_send_check(
     if blocked:
         reasons.append(f"'{blocked}' is on the do-not-contact list")
     if prospect is not None:
-        if (prospect.email or "").strip().lower() != to_email:
-            reasons.append("recipient does not match the prospect record")
-        allowed = sendable_email_statuses(allow_risky)
-        # Replies go back to someone who emailed US — deliverability proven.
-        if kind == "sequence" and (prospect.email_status or "guess") not in allowed:
-            reasons.append(
-                f"email_status '{prospect.email_status or 'guess'}' is not deliverable"
-            )
+        if whatsapp:
+            # The phone is the dedup key here, and a listing's local form is
+            # the same line as its E.164 form.
+            if not same_number(getattr(prospect, "phone", ""), to_email):
+                reasons.append("recipient does not match the prospect record")
+        else:
+            if (prospect.email or "").strip().lower() != to_email:
+                reasons.append("recipient does not match the prospect record")
+            allowed = sendable_email_statuses(allow_risky)
+            # Replies go back to someone who emailed US — deliverability proven.
+            if kind == "sequence" and (prospect.email_status or "guess") not in allowed:
+                reasons.append(
+                    f"email_status '{prospect.email_status or 'guess'}' is not deliverable"
+                )
 
     # Content sanity
-    if not subject:
+    if not subject and not whatsapp:
         reasons.append("empty subject")
     if not body:
         reasons.append("empty body")
-    if len(subject) > MAX_SUBJECT_LEN:
+    if len(subject) > MAX_SUBJECT_LEN and not whatsapp:
         reasons.append(f"subject too long ({len(subject)} > {MAX_SUBJECT_LEN})")
-    word_count = len(body.split())
-    if word_count > MAX_BODY_WORDS:
-        reasons.append(f"body too long ({word_count} words > {MAX_BODY_WORDS})")
+    if whatsapp:
+        # Meta's own ceiling is 4096 characters. A cold message anywhere near
+        # that gets blocked by the person, which is what costs the number.
+        if len(body) > MAX_WHATSAPP_CHARS:
+            reasons.append(
+                f"message too long ({len(body)} characters > {MAX_WHATSAPP_CHARS})")
+    else:
+        word_count = len(body.split())
+        if word_count > MAX_BODY_WORDS:
+            reasons.append(f"body too long ({word_count} words > {MAX_BODY_WORDS})")
 
     # Unrendered merge tags — the classic mass-mail embarrassment
     leftover = MERGE_TAG_RE.findall(subject + " " + body)
@@ -243,7 +322,11 @@ def pre_send_check(
     if len(links) > MAX_LINKS:
         reasons.append(f"too many links ({len(links)} > {MAX_LINKS})")
 
-    if kind == "sequence" and postal_address.strip() and postal_address.strip() not in body:
+    # CAN-SPAM is about email. WhatsApp's equivalent is the opt-out Meta
+    # enforces itself (a Block button on every message), so a postal address
+    # in a WhatsApp message is noise that eats the character budget.
+    if (kind == "sequence" and not whatsapp
+            and postal_address.strip() and postal_address.strip() not in body):
         reasons.append("postal address footer missing")
 
     # No HTML — Sellbird sends plain text only
@@ -251,6 +334,58 @@ def pre_send_check(
         reasons.append("HTML markup in body (plain text only)")
 
     return GateResult(ok=not reasons, reasons=reasons)
+
+
+# ── WhatsApp templates ────────────────────────────────────────────────────
+#
+# Meta only delivers a first message as a template it has approved, and it
+# checks the shape it approved. Sending text that is not that template gets
+# the message rejected and, repeated, the template pulled and the number's
+# standing cut. So the rendered text is checked against the approved body
+# here, deterministically, before it leaves — the same principle as the rest
+# of this module: the model may write, the code decides what goes.
+
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*\w+\s*\}\}")
+
+
+def _one_line(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def template_mismatch(rendered: str, template_body: str) -> str:
+    """Why ``rendered`` is not ``template_body`` with its placeholders
+    filled in, or "" when it is.
+
+    Whitespace runs are treated as equal, since that is the one thing
+    WhatsApp itself normalises. A placeholder must be filled with something:
+    an empty one leaves "Hi ," on the prospect's phone and is rejected by
+    Meta anyway.
+    """
+    if not _one_line(template_body):
+        return ("the approved text for this template isn't stored — "
+                "run `sellbird whatsapp templates`")
+    if not _one_line(rendered):
+        return "the message is empty"
+    # An unfilled placeholder is itself text, so it would satisfy the ".+?"
+    # below and pass. pre_send_check catches leftover tags too; this fails
+    # closed as well, because a template send is the one that costs the number.
+    leftover = _PLACEHOLDER_RE.findall(rendered)
+    if leftover:
+        return f"placeholder {leftover[0]} was never filled in"
+    parts = re.split(f"({_PLACEHOLDER_RE.pattern})", _one_line(template_body))
+    pattern = "".join(
+        r"(?s:.+?)" if _PLACEHOLDER_RE.fullmatch(part) else re.escape(part)
+        for part in parts
+    )
+    if re.fullmatch(pattern, _one_line(rendered)):
+        return ""
+    return "the message is not this approved template with its placeholders filled"
+
+
+def template_placeholders(template_body: str) -> list[str]:
+    """The placeholder names an approved template expects, in order."""
+    return [m.group(0).strip("{} ").strip()
+            for m in _PLACEHOLDER_RE.finditer(template_body or "")]
 
 
 # ── Autopilot review ──────────────────────────────────────────────────────
