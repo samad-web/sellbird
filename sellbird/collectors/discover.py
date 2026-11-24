@@ -464,6 +464,17 @@ class ProviderExhausted(RuntimeError):
     rather than failing every remaining phrase the same way."""
 
 
+def _as_float(value, default: float = 0.0) -> float:
+    """A provider's number, or the default. A malformed `cost` used to raise
+    inside fetch(), which the run loop caught as a generic query failure — so
+    that query's real spend was recorded as 0.0 and the budget check below it
+    was built on a number that was too small."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class DiscoveryProvider:
     """One way of answering "who exists".
 
@@ -586,7 +597,7 @@ class DataForSEOListings(DiscoveryProvider):
         )
         r.raise_for_status()
         data = r.json()
-        self.last_cost = float(data.get("cost") or 0.0)
+        self.last_cost = _as_float(data.get("cost"))
         return [self._to_business(item) for item in _dfs_items(data)]
 
     def _to_business(self, item: dict) -> Business:
@@ -665,7 +676,7 @@ class DataForSEOSerp(DiscoveryProvider):
         )
         r.raise_for_status()
         data = r.json()
-        self.last_cost = float(data.get("cost") or 0.0)
+        self.last_cost = _as_float(data.get("cost"))
         return _dfs_items(data)
 
     async def fetch(self, client, env, query):
@@ -1779,6 +1790,27 @@ async def run_discovery(
                     break
                 if report.actual_cost > max_spend:
                     report.stopped = "budget reached"
+                    break
+                # --max-spend is documented as a hard cap, so don't send the
+                # query that would cross it. The run-level estimate above
+                # already bounds a run whose estimates are right; what it
+                # cannot bound is a provider that bills MORE than it
+                # estimated, and the old check (actual > cap, after the fact)
+                # only noticed once the money was gone. So the predictor is
+                # whichever is worse: this query's estimate, or what queries
+                # in this run have actually been costing.
+                # (Only the Scavio adapters stop themselves mid-query.)
+                try:
+                    next_cost = provider.estimate([query])
+                except Exception:
+                    next_cost = 0.0
+                if report.queries_ran:
+                    next_cost = max(next_cost, report.actual_cost / report.queries_ran)
+                if report.actual_cost + next_cost > max_spend + 1e-12:
+                    report.stopped = (
+                        f"stopping before a query likely to cost ${next_cost:.4f} takes "
+                        f"the run past the ${max_spend:.2f} cap "
+                        f"(${report.actual_cost:.4f} spent)")
                     break
                 if i and provider.key == "osm":
                     await asyncio.sleep(OpenStreetMap.MIN_INTERVAL)

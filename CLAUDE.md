@@ -81,7 +81,9 @@ Walk through these steps conversationally. Ask one thing at a time. Don't overwh
 python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 ```
 
-Then install the browser for LinkedIn prospecting:
+Then install a browser. Claude uses it to check a draft's claims about a
+prospect's site (see "Check the drafts" below), and the opt-in LinkedIn module
+needs it too:
 ```bash
 python -m playwright install chromium
 ```
@@ -290,9 +292,16 @@ cohort; for a raise the round, amount and date; they read the homepage, About
 and press pages, and many startups never say it there), and the writer and
 handler then use `skills/selling_to_startups.md` for them. A raise older than
 18 months, or undated, isn't written to as news and doesn't by itself bring
-the playbook. Sellbird never reads ycombinator.com, the
-accelerators' directories, Crunchbase, PitchBook or LinkedIn (their terms
-forbid scraping), so don't suggest scraping them instead.
+the playbook. Discovery never reads ycombinator.com, the accelerators'
+directories, Crunchbase or PitchBook (their terms forbid scraping), so don't
+suggest scraping them instead — a company is tagged from what its *own* site
+says. LinkedIn is the one exception, and an opt-in one: `channels.linkedin
+.enabled` plus `LINKEDIN_EMAIL`/`LINKEDIN_PASSWORD` turns on a Playwright
+module that signs in as the user and runs people searches
+(`sellbird/integrations/linkedin.py`). It is off by default, it is against
+LinkedIn's terms, and automated searching and profile-viewing is what gets an
+account restricted — so never enable it for the user, and if they ask, say
+plainly what it risks before they decide.
 
 **Depth 20-30, not 100.** Google removed 100-results-per-page in September 2025,
 so depth 100 is now billed as ten pages at nearly every provider. Below rank 30

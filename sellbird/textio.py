@@ -13,6 +13,28 @@ from pathlib import Path
 logger = logging.getLogger("sellbird.textio")
 
 
+def csv_cell(value):
+    """One CSV cell, safe to open in a spreadsheet.
+
+    Excel, Google Sheets and LibreOffice treat a cell starting with "=", "+",
+    "-" or "@" as a formula. Almost every text column Sellbird exports —
+    company name, title, industry, the personalization note — is text scraped
+    off somebody else's website, so without this a prospect's own site decides
+    what runs when the user opens prospects.csv.
+
+    Numbers pass through as numbers; a leading apostrophe makes anything else
+    literal.
+    """
+    if isinstance(value, bool) or value is None:
+        return "" if value is None else str(value)
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")):
+        return "'" + text
+    return text
+
+
 def read_user_text(path) -> str:
     """A file a person or an older Sellbird may have saved (sellbird.yaml, .env,
     skills, prompts): UTF-8, with or without a BOM, else the locale's code

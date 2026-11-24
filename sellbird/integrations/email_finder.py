@@ -66,6 +66,12 @@ DEFAULT_SOURCES = ("default", "default_after_hunter")
 WEAK_SOURCES = DEFAULT_SOURCES + ("site_address_guess", "site_address_guess_after_hunter")
 
 
+class MXUnavailable(Exception):
+    """The MX lookup could not be made (timeout, SERVFAIL, no resolver).
+    Transient: the domain is asked again later, and never recorded as having
+    no mail server — that verdict is terminal for a prospect."""
+
+
 class HunterUnavailable(Exception):
     """Hunter couldn't answer right now (timeout, 429, 5xx). Transient: the
     domain is asked again later, never remembered as having no pattern."""
@@ -147,25 +153,36 @@ def classify_mx(mx_host: str) -> str:
 
 
 async def get_mx_host(domain: str) -> Optional[str]:
-    """Primary MX host for a domain (cached; None on failure)."""
+    """Primary MX host for a domain, or None when the domain has no MX.
+
+    Raises MXUnavailable when the lookup could not be made — a timeout, a
+    SERVFAIL, no resolver. The distinction matters because a caller reads
+    None as "this domain cannot receive mail at all", which writes a prospect
+    off permanently; "the DNS server was busy" must never mean that. Only a
+    real answer is cached, so a blip is retried instead of remembered.
+    """
     domain = _clean_domain(domain)
     if not domain:
         return None
     if domain in _mx_cache:
         return _mx_cache[domain]
+    loop = asyncio.get_event_loop()
     try:
-        loop = asyncio.get_event_loop()
         answers = await loop.run_in_executor(
             None, lambda: dns.resolver.resolve(domain, "MX")
         )
-        records = sorted(answers, key=lambda x: x.preference)
-        mx_host = str(records[0].exchange).rstrip(".") if records else None
-        _mx_cache[domain] = mx_host or None
-        return _mx_cache[domain]
-    except Exception as e:
-        logger.debug(f"MX lookup failed for {domain}: {e}")
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN) as e:
+        # A real answer: there is no mail server here. Worth remembering.
+        logger.debug(f"{domain} has no MX record: {e}")
         _mx_cache[domain] = None
         return None
+    except Exception as e:
+        # Could not ask. Never cached, never reported as "no MX".
+        logger.debug(f"MX lookup failed for {domain}: {e}")
+        raise MXUnavailable(f"MX lookup for {domain} failed: {e}") from e
+    records = sorted(answers, key=lambda x: x.preference)
+    _mx_cache[domain] = str(records[0].exchange).rstrip(".") if records else None
+    return _mx_cache[domain]
 
 
 # ── Pattern derivation ──
@@ -612,7 +629,10 @@ async def verify_email_smtp(email: str) -> Optional[bool]:
     if "@" not in email:
         return False
     domain = email.rsplit("@", 1)[1]
-    mx_host = await get_mx_host(domain)
+    try:
+        mx_host = await get_mx_host(domain)
+    except MXUnavailable:
+        return None         # couldn't tell, which is what None means here
     if not mx_host:
         return None
     smtp = aiosmtplib.SMTP(hostname=mx_host, port=25, timeout=10)
@@ -741,7 +761,10 @@ async def verify_published_address(email: str, env=None) -> str:
     domain = email.partition("@")[2]
     if not domain:
         return "invalid"
-    mx_host = await get_mx_host(domain)
+    try:
+        mx_host = await get_mx_host(domain)
+    except MXUnavailable:
+        return "guess"      # couldn't ask, so nothing is claimed
     if not mx_host:
         return "invalid"
     status, _ = await _verify_candidate(email, classify_mx(mx_host), env)
@@ -791,9 +814,18 @@ async def find_email(
     if not (first_name and last_name and domain):
         return EmailResult(email="", status="invalid")
 
-    mx_host = await get_mx_host(domain)
+    try:
+        mx_host = await get_mx_host(domain)
+    except MXUnavailable as e:
+        # We don't know whether this domain takes mail, so we don't claim it
+        # doesn't: "invalid" is terminal (not in WRITABLE_EMAIL_STATUSES, shown
+        # as closed out, never re-verified), and one busy resolver would write
+        # off every prospect at the domain for good.
+        logger.info(f"Email for {first_name} {last_name}@{domain}: {e}; left as a guess")
+        guess = build_email(DEFAULT_PATTERN, first_name, last_name, domain)
+        return EmailResult(email=guess, status="guess", mx_type="")
     if not mx_host:
-        # No MX → cannot receive mail at all.
+        # A real answer: no MX, so the domain cannot receive mail at all.
         guess = build_email(DEFAULT_PATTERN, first_name, last_name, domain)
         return EmailResult(email=guess, status="invalid", mx_type="none")
 

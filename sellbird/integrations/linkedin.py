@@ -8,6 +8,7 @@ protect the user's LinkedIn account from restriction.
 import asyncio
 import json
 import logging
+import os
 import random
 from datetime import date
 from pathlib import Path
@@ -149,15 +150,30 @@ class LinkedInAutomation:
         self.page = await self.context.new_page()
 
     def _save_cookies_sync(self, cookies: list):
+        """Write the cookie jar owner-only, with no readable window.
+
+        Session cookies are credentials. write_text() then chmod() creates the
+        file with whatever the umask allows and tightens it afterwards, so
+        another local user can read it in between. The dashboard's token
+        writer avoids exactly this; so does this now: a private temporary file
+        in the same directory, then an atomic replace.
+        """
         try:
             COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
-            COOKIES_PATH.write_text(json.dumps(cookies), encoding="utf-8")
+            tmp = COOKIES_PATH.with_name(f".{COOKIES_PATH.name}.{os.getpid()}.tmp")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+            fd = os.open(tmp, flags, 0o600)
             try:
-                COOKIES_PATH.chmod(0o600)  # session cookies are credentials
-            except OSError:
-                pass
+                os.write(fd, json.dumps(cookies).encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp, COOKIES_PATH)   # atomic, and keeps the 0600 mode
         except OSError as e:
             logger.warning(f"Could not save LinkedIn cookies: {e}")
+            try:
+                os.unlink(tmp)
+            except (OSError, NameError, UnboundLocalError):
+                pass
 
     async def stop(self):
         """Save cookies and close browser."""

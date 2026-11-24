@@ -8,6 +8,8 @@ so a human can eyeball what they're getting.
 
 import csv
 import io
+
+from sellbird.textio import csv_cell
 import logging
 
 from sellbird.gate import do_not_contact_match
@@ -119,11 +121,17 @@ def _do_not_contact(config) -> list[str]:
 
 
 def to_csv(rows: list[dict]) -> str:
+    """The prospect list as CSV, safe to open in a spreadsheet.
+
+    Every text column here is scraped from somebody else's website, so each
+    cell goes through textio.csv_cell: see audit finding 11, and register.py,
+    which has done this since it was written.
+    """
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow(row)
+        writer.writerow({key: csv_cell(row.get(key)) for key in CSV_COLUMNS})
     return buf.getvalue()
 
 

@@ -75,6 +75,8 @@ class SmtpImapProvider(MailProvider):
     def __init__(self, config, env, *, identity: MailIdentity | None = None,
                  smtp: SmtpSettings | None = None):
         self.config = config
+        # IMAP ids read but not yet flagged \Seen (see confirm_read).
+        self._pending_seen: list[bytes] = []
         # Settable: a mailbox transport points it at the inbox it sends from.
         self.identity = identity or identity_from_config(config)
         if smtp is not None:  # another inbox: its own settings, not the .env's
@@ -149,7 +151,18 @@ class SmtpImapProvider(MailProvider):
             return []
 
     def _fetch_unseen(self, limit: int) -> list[InboundMessage]:
+        """Read the unseen inbox WITHOUT consuming it.
+
+        BODY.PEEK[] rather than RFC822: a plain RFC822 fetch sets \\Seen as a
+        side effect, which would make the *read* consume the message instead
+        of handling it. The Handler relies on the opposite — a reply it could
+        not handle (Claude down) is deliberately left unprocessed so the next
+        cycle reads it again — and a message already flagged \\Seen never comes
+        back from an UNSEEN search. It was lost, and its stop-on-reply with it.
+        confirm_read() flags them once the Handler says it is done.
+        """
         out: list[InboundMessage] = []
+        read_ids: list[bytes] = []
         conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
         try:
             conn.login(self.imap_user, self.imap_pass)
@@ -159,21 +172,50 @@ class SmtpImapProvider(MailProvider):
                 return []
             ids = data[0].split()[-limit:]
             for msg_id in ids:
-                status, parts = conn.fetch(msg_id, "(RFC822)")
+                status, parts = conn.fetch(msg_id, "(BODY.PEEK[])")
                 if status != "OK" or not parts or not isinstance(parts[0], tuple):
                     continue
-                parsed = self._parse_rfc822(parts[0][1])
+                parsed = self._parse_rfc822(parts[0][1], uid=msg_id)
                 if parsed:
                     out.append(parsed)
+                    read_ids.append(msg_id)
         finally:
             try:
                 conn.logout()
             except Exception:
                 pass
+        self._pending_seen = read_ids
         return out
 
+    def confirm_read(self) -> None:
+        """Everything the last get_replies returned was handled: flag it read.
+
+        A failure here is logged, not raised: the messages were handled, and
+        the Handler dedups on provider_id, so the worst case is re-reading a
+        message that is then skipped — never a lost reply.
+        """
+        ids, self._pending_seen = self._pending_seen, []
+        if not ids:
+            return
+        try:
+            conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
+        except Exception as e:
+            logger.warning(f"IMAP: couldn't mark {len(ids)} message(s) read: {e}")
+            return
+        try:
+            conn.login(self.imap_user, self.imap_pass)
+            conn.select("INBOX")
+            conn.store(b",".join(ids), "+FLAGS", "\\Seen")
+        except Exception as e:
+            logger.warning(f"IMAP: couldn't mark {len(ids)} message(s) read: {e}")
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+
     @staticmethod
-    def _parse_rfc822(raw: bytes) -> InboundMessage | None:
+    def _parse_rfc822(raw: bytes, uid: bytes = b"") -> InboundMessage | None:
         try:
             msg = email.message_from_bytes(raw, policy=email.policy.default)
         except Exception:
@@ -195,8 +237,17 @@ class SmtpImapProvider(MailProvider):
             pass
 
         message_id = str(msg.get("Message-ID", "")).strip()
+        # Dedup key. Mail without a Message-ID is rare but real, and
+        # "{sender}:{subject}" collided for two replies in one thread — the
+        # second was dropped as already processed, and a person's second
+        # message is usually the one that says yes. The mailbox UID is unique;
+        # the date is the fallback when even that is missing.
+        fallback = ":".join(filter(None, [
+            from_email, subject, (uid or b"").decode("ascii", "replace"),
+            str(msg.get("Date", "")).strip(),
+        ]))
         return InboundMessage(
-            provider_id=message_id or f"{from_email}:{subject}",
+            provider_id=message_id or fallback,
             from_email=from_email,
             subject=subject,
             body=(body or "")[:5000],

@@ -51,18 +51,17 @@ company phones. No new collector.
 
 ## Known issues (see build-docs/AUDIT.md)
 
-Findings 1-10 (first pass) are fixed. Findings 11-18 (second pass) are open; the three
-that matter:
+All 18 findings from both passes are fixed. Two are worth remembering as
+decisions rather than patches:
 
-- **11** `sellbird export` writes scraped company names and notes into CSV unescaped,
-  so a hostile site can run a spreadsheet formula on the user's machine.
-- **12** The SMTP provider's IMAP read marks a message `Seen` as a side effect and has
-  no `confirm_read`, so a reply that arrives while Claude is down is lost for good and
-  its stop-on-reply never runs.
-- **13** A failed MX lookup is cached forever and read as "cannot receive mail", so one
-  DNS blip marks every prospect at that domain `invalid`, which is terminal.
-
-And one decision for the user, not a patch: **14** — `CLAUDE.md` states Sellbird never
-reads LinkedIn because their terms forbid scraping, while the repo ships a 433-line
-Playwright LinkedIn scraper that the setup steps tell users to install a browser for.
-Delete the module or correct the claim.
+- **14** `CLAUDE.md` used to state flatly that Sellbird never reads LinkedIn
+  because their terms forbid scraping, while the repo ships a 433-line
+  Playwright scraper. The claim was corrected rather than the module deleted,
+  so LinkedIn prospecting still exists: off by default, against LinkedIn's
+  terms, and Claude is told never to enable it for the user. Deleting the
+  module is still the cleaner option if it is never used.
+- **15** `--max-spend` now predicts the next query's cost as the worse of its
+  estimate and what queries in this run have actually cost. The old check
+  looked only at money already spent, so a provider that billed more than it
+  estimated finished one whole query past the cap — $4.00 against a $3.00 cap
+  in the repo's own test, which asserted the stop message but never the spend.

@@ -9,6 +9,8 @@ the register for people to follow up another way.
 from __future__ import annotations
 
 import csv
+
+from sellbird.textio import csv_cell
 import io
 
 from sellbird.config import ComplianceConfig, live_do_not_contact
@@ -186,20 +188,10 @@ def sqlite_query(db_path):
     return query_db
 
 
-def _cell(value):
-    """Text from websites must not run as a spreadsheet formula."""
-    if isinstance(value, (int, float)):
-        return value
-    text = str(value or "")
-    if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")):
-        return "'" + text
-    return text
-
-
 def to_csv(rows: list[dict]) -> str:
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=COLUMNS, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow({k: _cell(row.get(k)) for k in COLUMNS})
+        writer.writerow({k: csv_cell(row.get(k)) for k in COLUMNS})
     return buf.getvalue()

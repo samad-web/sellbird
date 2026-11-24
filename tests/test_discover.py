@@ -180,14 +180,22 @@ async def test_budget_cap_refuses_before_spending(state, config, register):
 @pytest.mark.asyncio
 async def test_budget_stops_mid_run_when_actual_exceeds_estimate(state, config, register):
     # Cheap to estimate, expensive in reality — the loop has to notice.
+    #
+    # It used to notice one query too late: it checked what had already been
+    # spent, so with a $3.00 cap it ran a fourth query and finished on $4.00.
+    # Now the predictor is the worse of this query's estimate and what queries
+    # in this run have actually cost, so the run stops ON the cap, not past it
+    # (audit finding 15).
     fake = FakeProvider([[biz(domain=f"{c}.com")] for c in "abcdefghij"],
                         per_query_cost=1.0)
     fake.estimate = lambda queries: 0.0
     register(fake)
     q = [D.DiscoveryQuery(term="roofer", location=c) for c in "abcdefghij"]
     report = await D.run_discovery(state, config, "fake", q, max_spend=3.0)
-    assert report.stopped == "budget reached"
+    assert "cap" in report.stopped
     assert fake.calls < 10
+    # The point of a cap: never spend more than it says.
+    assert report.actual_cost <= 3.0, f"spent ${report.actual_cost} against a $3.00 cap"
 
 
 @pytest.mark.asyncio
