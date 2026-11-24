@@ -185,6 +185,11 @@ Judged against that, not against a multi-tenant service.
 
 # Second pass — 2026-11-24 (the rest of the repo)
 
+**Status: all eight findings fixed** (`839b19f`), with 31 tests in
+`tests/test_audit_fixes.py`. Finding 15's first fix was wrong and is noted
+as such below. Finding 14 was resolved by correcting the documentation, not
+by deleting the module — see `MEMORY.md`.
+
 The first pass read the sending path, the gate, the dashboard's auth layer and the
 outbox half of `state.py`. This one covers what was left. Numbering continues, so
 "fix 12" still means one thing.
@@ -300,9 +305,15 @@ plus each module's riskiest function.
   SERP and Maps, Serper and TinyFish all ignore it. The overshoot is bounded by one
   query — cents for SERP at $0.006, up to about $0.37 for a Listings query that fills a
   page — so this is money-small and promise-large.
-- **Fix:** before each query, compare `actual_cost + provider.estimate([query])`
-  against the cap and stop if it would exceed it. The per-query estimate already exists
-  on every adapter.
+- **Fix, and a correction:** my first fix compared `actual_cost +
+  provider.estimate([query])` against the cap. That was wrong, and the repo's own test
+  showed it: the run-level estimate gate already bounds a run whose estimates are
+  honest, so the *only* way to exceed the cap is a provider that bills more than it
+  estimated — which an estimate-based pre-check cannot see either. The predictor is now
+  the worse of the query's estimate and what queries in this run have actually cost.
+  `test_budget_stops_mid_run_when_actual_exceeds_estimate` was already exercising this
+  path and spending $4.00 against a $3.00 cap; it asserted the stop message and never
+  the spend, which is why nobody noticed. It asserts the spend now.
 - **If we skip it:** a documented hard cap is soft, which is the kind of thing users
   discover on the bill.
 
