@@ -27,6 +27,7 @@ from sellbird.integrations.instantly import InstantlyClient
 from sellbird.integrations.mail_provider import (
     NATIVE_PROVIDERS, get_mail_provider, get_whatsapp_provider, strip_quoted_reply,
 )
+from sellbird.integrations.wasi import DEAD_NUMBER_META_CODES
 from sellbird.models.conversation import Conversation, Message
 from sellbird.send_window import recipient_zone
 from sellbird.state import (
@@ -1314,7 +1315,95 @@ class Handler:
             logger.info(f"Handler: processed {handled} WhatsApp message(s).")
         if complete:
             self.whatsapp.confirm_read()
+        # Neither of these is a reply, so neither affects `complete`: they are
+        # housekeeping, and a failure in them must not hold sending.
+        for sweep in (self._sync_whatsapp_opt_outs, self._check_whatsapp_failures):
+            try:
+                await sweep()
+            except Exception as e:
+                logger.warning(f"Handler: {sweep.__name__} failed: {e}")
         return complete
+
+    async def _sync_whatsapp_opt_outs(self) -> int:
+        """Honour opt-outs and blocks that happened inside WhatsApp.
+
+        Someone who taps Block, or opts out through a template's own button,
+        never sends a message Sellbird could read — so without this they stay
+        in the pipeline for ever, and every message to them makes the number's
+        standing worse. Wasi tracks it, so Sellbird reads it.
+        """
+        contacts = await self.whatsapp.contacts()
+        stopped = 0
+        for contact in contacts:
+            gone = (contact.get("opt_out_at") or contact.get("whatsapp_blocked_at")
+                    or str(contact.get("opt_in_status") or "").lower() == "opted_out")
+            number = str(contact.get("phone") or contact.get("wa_id") or "")
+            if not gone or not number:
+                continue
+            if not number.startswith("+"):
+                number = "+" + number
+            if await self.state.is_suppressed(number):
+                continue       # already known
+            blocked = bool(contact.get("whatsapp_blocked_at"))
+            await self._suppress(number, "opted_out",
+                                 "whatsapp_blocked" if blocked else "whatsapp_opt_out",
+                                 kind="phone")
+            prospect = await self.state.get_prospect_by_phone(number)
+            if prospect is not None:
+                # Their WhatsApp is closed to us. Email is a separate
+                # permission and is deliberately left alone: a block in one
+                # app is not an unsubscribe from the other.
+                cancelled = await self.state.cancel_pending_outbox_for_prospect(
+                    prospect.id, reason="blocked on whatsapp" if blocked
+                    else "opted out on whatsapp")
+                logger.info(
+                    f"Handler: {number} "
+                    f"{'blocked us on WhatsApp' if blocked else 'opted out on WhatsApp'} — "
+                    f"suppressed, {cancelled} queued message(s) cancelled. Email is unaffected.")
+            stopped += 1
+        if stopped:
+            await self.state.log_action(
+                action_type="whatsapp_opt_out_sync", agent="handler",
+                details={"stopped": stopped})
+        return stopped
+
+    async def _check_whatsapp_failures(self) -> int:
+        """Catch sends Meta rejected after it had accepted them.
+
+        A send can come back 'sent' and fail minutes later, which is how a
+        number that isn't on WhatsApp usually shows up. Only the threads with
+        recent sends are read, so this costs a handful of requests, not one
+        per conversation.
+        """
+        recent = await self.state.recent_whatsapp_sends(hours=48)
+        if not recent:
+            return 0
+        by_message = {row["message_id"]: row for row in recent if row.get("message_id")}
+        failures = await self.whatsapp.failed_messages(
+            [row.get("thread_ref") or "" for row in recent])
+        found = 0
+        for failure in failures:
+            row = by_message.get(str(failure.get("meta_message_id") or ""))
+            if row is None:
+                continue
+            code = failure.get("meta_error_code")
+            reason = str(failure.get("error_reason") or f"Meta error {code}")
+            await self.state.update_outbox_item(
+                row["id"], status="failed",
+                error=f"WhatsApp rejected it after accepting it: {reason}"[:300])
+            found += 1
+            if code not in DEAD_NUMBER_META_CODES:
+                continue
+            prospect = await self.state.get_prospect(row["prospect_id"])
+            await self._suppress(row["to_email"], "bounced", "whatsapp", kind="phone")
+            if prospect is not None:
+                cancelled = await self.state.cancel_pending_outbox_for_prospect(
+                    prospect.id, reason="whatsapp number unreachable")
+                logger.warning(
+                    f"Handler: {row['to_email']} is not reachable on WhatsApp "
+                    f"({reason}) — suppressed, {cancelled} queued message(s) "
+                    "cancelled. Email is unaffected.")
+        return found
 
     async def _handle_bounce(self, msg):
         """A bounce is a data bug AND a reputation threat. Fix both."""

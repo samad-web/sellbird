@@ -1703,17 +1703,27 @@ async function loadOutbox() {
 
   list.innerHTML =
     table('Approved &amp; scheduled', data.approved, [
-      ['To', r => r.to_email], ['Step', r => r.step], ['Subject', r => r.subject],
+      ['To', r => escHtml(r.to_email) + channelMark(r), false, true],
+      ['Step', r => r.step], ['Subject', r => r.subject],
       ['Sends', r => r.status === 'sending' ? badge(r.status) : escHtml(formatDate(r.send_at)), true, true],
     ]) +
     table('Recently sent', data.sent, [
-      ['To', r => r.to_email], ['Step', r => r.step], ['Subject', r => r.subject],
+      ['To', r => escHtml(r.to_email) + channelMark(r), false, true],
+      ['Step', r => r.step], ['Subject', r => r.subject],
       ['Sent', r => formatDate(r.sent_at), true],
     ]) +
     table('Didn\'t send', data.failed, [
       ['To', r => r.to_email], ['Status', r => badge(r.status), false, true],
       ['Reason', r => r.error, true], ['Updated', r => formatDate(r.updated_at), true],
     ]);
+}
+
+// Which channel a row went out on. Email rows (everything before the
+// WhatsApp channel existed) carry no marker, so the tables stay as they were.
+function channelMark(r) {
+  return (r.channel && r.channel !== 'email')
+    ? ' <span class="chan chan-' + escHtml(r.channel) + '">' + escHtml(r.channel) + '</span>'
+    : '';
 }
 
 const CONTACT_SOURCES = {
@@ -1914,7 +1924,10 @@ function renderDesk(items, i) {
     '<div class="desk-list">' + rail + '</div>' +
     '<div class="desk-pane">' +
       '<div class="to-line">To <b>' + escHtml(cur.to_email) + '</b>' +
-        '<span class="tag">' + (cur.kind === 'reply' ? 'Reply' : 'Email ' + escHtml(String(cur.step))) + '</span>' +
+        '<span class="tag">' + (cur.kind === 'reply'
+          ? 'Reply'
+          : ((cur.channel === 'whatsapp' ? 'WhatsApp ' : 'Email ') + escHtml(String(cur.step)))) + '</span>' +
+        channelMark(cur) +
         '<span class="muted">sends ' + formatDate(cur.send_at) + '</span></div>' +
       renderDeskContext(cur.context) +
       (heldReason(cur)

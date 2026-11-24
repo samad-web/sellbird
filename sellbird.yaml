@@ -101,6 +101,22 @@ channels:
     max_daily_connections: 20
     max_daily_messages: 10
 
+  # WhatsApp through Wasi. Off by default — read docs/whatsapp.md first:
+  # Meta only delivers a first message as a template it approved in advance,
+  # and cold outreach is what gets a number banned.
+  whatsapp:
+    enabled: false
+    provider: wasi            # needs WASI_API_KEY in .env
+    max_daily_sends: 20       # the lower of this and Meta's own 24h allowance
+    require_approval: true    # every message waits in the Outbox, as with email
+    cold_first_touch: false   # message people who never wrote first (risky)
+    cold_template: ""         # an approved *Marketing* template, by name
+    default_country_code: ""  # a dialling prefix for local numbers, e.g. "+44"
+    pause_below_green: true   # stop cold sending if Meta's quality rating drops
+    # templates: copied from `sellbird whatsapp templates`
+    # template_params: {customer_name: "{{first_name}}"}
+
+
 usage:
   max_daily_claude_percent: 80
   heartbeat_interval_minutes: 15

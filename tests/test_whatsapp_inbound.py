@@ -52,6 +52,13 @@ class FakeWasi:
     async def quality_problem(self):
         return ""
 
+    # Housekeeping sweeps: quiet by default, overridden where they matter.
+    async def contacts(self, limit=100):
+        return []
+
+    async def failed_messages(self, chat_ids):
+        return []
+
 
 class StubBrain:
     def __init__(self, intent="question", reply="Happy to help."):
@@ -347,3 +354,80 @@ async def test_the_provider_maps_wasis_error_shape():
                                     "details": ["to: Required"]})
     assert "to: Required" in validation.detail
     assert not validation.dead_number
+
+
+# ── B4: what happens with no reply at all ──
+
+@pytest.mark.asyncio
+async def test_a_block_inside_whatsapp_is_honoured_without_any_reply(state):
+    """Tapping Block sends nothing we could read, so Wasi's state is read."""
+    pid = await _prospect(state)
+    await state.add_outbox_item(
+        prospect_id=pid, to_email=WA, subject="", body="hi",
+        send_at=_now_iso(), status="approved", channel="whatsapp", provider="wasi",
+    )
+    provider = FakeWasi([])
+    provider.contact_rows = [
+        {"phone": "15550100123", "whatsapp_blocked_at": "2026-11-24T09:00:00.000Z"}]
+
+    async def contacts(limit=100):
+        return provider.contact_rows
+    provider.contacts = contacts
+
+    handler = _handler(state, provider)
+    assert await handler.run() is True
+
+    assert await state.is_suppressed(WA) == "opted_out"
+    assert await state.get_outbox(status="approved", channel="whatsapp") == []
+    # Email is a separate permission: a block in one app is not an unsubscribe
+    # from the other.
+    assert await state.is_suppressed("dana@example.com") is None
+
+
+@pytest.mark.asyncio
+async def test_a_send_rejected_after_being_accepted_is_caught(state):
+    """Meta can accept a send and fail it minutes later."""
+    pid = await _prospect(state)
+    item = await state.add_outbox_item(
+        prospect_id=pid, to_email=WA, subject="", body="hi",
+        send_at=_now_iso(), status="approved", channel="whatsapp", provider="wasi",
+    )
+    await state.update_outbox_item(
+        item, status="sent", sent_at=_now_iso(),
+        message_id="wamid.LATE", thread_ref="chat-1")
+
+    provider = FakeWasi([])
+
+    async def contacts(limit=100):
+        return []
+
+    async def failed_messages(chat_ids):
+        assert list(chat_ids) == ["chat-1"]      # only threads we sent into
+        return [{"meta_message_id": "wamid.LATE", "status": "failed",
+                 "meta_error_code": 131026, "error_reason": "Message undeliverable",
+                 "chat_id": "chat-1"}]
+    provider.contacts = contacts
+    provider.failed_messages = failed_messages
+
+    handler = _handler(state, provider)
+    await handler.run()
+
+    row = await state.get_outbox_item(item)
+    assert row["status"] == "failed"
+    assert "after accepting it" in row["error"]
+    assert await state.is_suppressed(WA) == "bounced"
+
+
+@pytest.mark.asyncio
+async def test_housekeeping_failures_never_hold_sending(state):
+    """A broken sweep must not look like an unread reply."""
+    await _prospect(state)
+    provider = FakeWasi([])
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("Wasi hiccup")
+    provider.contacts = boom
+    provider.failed_messages = boom
+
+    handler = _handler(state, provider)
+    assert await handler.run() is True        # still a clean read

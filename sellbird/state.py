@@ -1698,6 +1698,24 @@ class StateManager:
             ) as cursor:
                 return (await cursor.fetchone())[0]
 
+    async def recent_whatsapp_sends(self, hours: int = 48) -> list[dict]:
+        """WhatsApp rows marked sent in the last ``hours``.
+
+        Used to catch a send Meta rejected after accepting it: those arrive
+        with no inbound message, so the only way to see one is to look at the
+        threads we recently sent into.
+        """
+        since = (_utcnow() - timedelta(hours=max(int(hours), 1))).isoformat()
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, prospect_id, to_email, message_id, thread_ref FROM outbox "
+                "WHERE COALESCE(channel, 'email') = 'whatsapp' AND status = 'sent' "
+                "AND sent_at >= ? ORDER BY sent_at DESC LIMIT 200",
+                (since,),
+            ) as cursor:
+                return [dict(r) for r in await cursor.fetchall()]
+
     async def trailing_bounce_rate(
         self, window: int = BOUNCE_RATE_WINDOW
     ) -> tuple[int, int]:

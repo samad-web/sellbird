@@ -372,25 +372,37 @@ class WasiProvider(MailProvider):
             self._cursor = self._pending_cursor
             self._pending_cursor = ""
 
-    async def failed_sends(self, limit: int = MAX_PAGE) -> list[dict]:
-        """Outbound messages Meta rejected, with their error codes.
+    async def failed_messages(self, chat_ids: Sequence[str]) -> list[dict]:
+        """Outbound messages Meta rejected, in the named threads only.
 
-        WhatsApp has no bounce message: a dead number shows up as an outbound
-        row that failed. Returns the raw rows so the Handler can map a code to
-        "this number will never work" and suppress it.
+        WhatsApp has no bounce message: a number that will never receive
+        anything shows up as an outbound row whose status went to 'failed',
+        and that can happen minutes after the send was accepted. The caller
+        passes the threads it actually has recent sends in, because sweeping
+        every thread would be one request per conversation per cycle.
         """
-        threads = await self._request(
-            "GET", "/conversations", params={"limit": min(int(limit), MAX_PAGE)})
         failures: list[dict] = []
-        for thread in (threads or []):
-            if not isinstance(thread, dict) or not thread.get("id"):
+        for chat_id in list(dict.fromkeys(c for c in chat_ids if c))[:MAX_PAGE]:
+            try:
+                messages = await self._request(
+                    "GET", f"/conversations/{chat_id}/messages")
+            except WasiError as e:
+                logger.warning("Wasi: couldn't read thread %s: %s", chat_id, e)
                 continue
-            messages = await self._request(
-                "GET", f"/conversations/{thread['id']}/messages")
             for message in (messages or []):
                 if not isinstance(message, dict):
                     continue
-                if str(message.get("status") or "").lower() != "failed":
-                    continue
-                failures.append({**message, "phone": thread.get("phone") or ""})
+                if str(message.get("status") or "").lower() == "failed":
+                    failures.append({**message, "chat_id": chat_id})
         return failures
+
+    async def contacts(self, limit: int = MAX_PAGE) -> list[dict]:
+        """Wasi's contacts, with the opt-in state it tracks itself.
+
+        This is the only way to learn that someone blocked the number or opted
+        out inside WhatsApp: they never send a message Sellbird could read, so
+        without this they would stay in the pipeline for ever.
+        """
+        body = await self._request(
+            "GET", "/contacts", params={"limit": min(int(limit), MAX_PAGE)})
+        return [c for c in (body or []) if isinstance(c, dict)]

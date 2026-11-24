@@ -54,6 +54,17 @@ People will ask "how does this work?" — explain it simply:
 
 - **"Can it use ChatGPT / Codex instead of Claude?"** → Yes, opt-in. Install Codex CLI 0.159.3 (`npm install -g @openai/codex@0.159.3`; other versions are refused), run `codex login` with ChatGPT, and set `brain: { provider: codex, model: gpt-5.5 }` in sellbird.yaml (or choose codex in `sellbird setup`, which suggests gpt-5.5, or `sellbird train <url> --provider codex --model gpt-5.5`). Any exact model ID from the account's catalog also works, including Luna, Sol and Terra models (e.g. `gpt-6.1-sol`): Sellbird runs them in a private text-only catalog copy with no tools. A blank model picks the highest-priority listed model; an unlisted model needs an explicit ID, and unknown model IDs or unrecognised tool modes are refused. Claude stays the default; Sellbird never switches providers on its own. Each Codex call runs isolated with no tools — see docs/codex.md. macOS and Linux only; on Windows, Codex is refused, so use Claude. Don't edit the user's own `~/.codex` config to make it work.
 
+- **"Can it message people on WhatsApp?"** → Yes, through Wasi (a WhatsApp CRM on
+  Meta's official Cloud API), and it's **off by default**. Read `docs/whatsapp.md`
+  before turning it on: Meta only delivers a *first* message as a template it
+  approved in advance, a cold opener must use an approved **Marketing** template (not
+  a Utility one), and cold outreach on WhatsApp is the main way a number and its
+  WhatsApp Business Account get banned. Recommend it for people who already replied
+  to an email and gave a number. Everything else is shared with email — the Outbox
+  approval ladder, the pre-send gate, suppressions, and stop-on-reply, which cancels
+  queued messages on *both* channels. Never turn `cold_first_touch` on yourself
+  without the user asking for it in so many words.
+
 - **"What's the dashboard?"** → Have the user run `sellbird dashboard` in their own terminal and open the private link it prints (`http://127.0.0.1:5555/#token=…`; `sellbird dashboard --url` prints it again). Don't read, print or repeat the token yourself: it unlocks the dashboard. It opens on **Today** — anything waiting on a decision, then the pipeline. Tabs for Signals, Companies, Contacts, Campaigns, Outbox, Conversations, Activity, Usage, Settings.
 
 - **"What are signals?"** → Signals are the facts Sellbird collects about a business: who its current agency is, whether it's running ads, whether it has online booking, how it ranks. **Sellbird proposes; you confirm.** Nothing is collected until the user says yes on the Signals tab (or `sellbird signals --confirm ...`). That keeps spend intentional and makes every prospect list explainable — a cohort is a query over signals a human chose, not a black box.
@@ -381,6 +392,8 @@ sellbird discover              # Find businesses; --providers / --estimate / --p
 sellbird sending pause|resume  # Kill switch for all outbound
 sellbird warmup [domain]       # Sending-domain readiness: SPF/DKIM/DMARC, age, blocklists, ramp, TrulyInbox warmup
 sellbird trulyinbox [connect|other]  # Warmup service: connect TrulyInbox, or record another service
+sellbird whatsapp test|templates|queue|backfill-phones   # WhatsApp through Wasi (docs/whatsapp.md)
+sellbird outbox --channel whatsapp   # review only the WhatsApp queue
 ```
 
 ### Common Issues

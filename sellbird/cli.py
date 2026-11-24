@@ -553,15 +553,22 @@ def cmd_outbox(args):
             print(f"\n  ⚠ SENDING PAUSED: {paused}")
             print("  Resume with: sellbird sending resume")
 
-        pending = await state.get_outbox(status="pending_review", limit=50)
-        approved = await state.get_outbox(status="approved", limit=10)
-        print(f"\n  Outbox — {len(pending)} awaiting approval, "
+        channel = (getattr(args, "channel", "") or "").strip().lower() or None
+        pending = await state.get_outbox(status="pending_review", limit=50, channel=channel)
+        approved = await state.get_outbox(status="approved", limit=10, channel=channel)
+        where = f" ({channel} only)" if channel else ""
+        print(f"\n  Outbox{where} — {len(pending)} awaiting approval, "
               f"{len(approved)}+ approved/scheduled")
         print("  " + "=" * 60)
         for item in pending:
-            print(f"\n  [{item['id']}] step {item['step']} ({item['kind']}) "
+            on = item.get("channel") or "email"
+            print(f"\n  [{item['id']}] step {item['step']} ({item['kind']}, {on}) "
                   f"→ {item['to_email']}  (send {item['send_at'][:16]})")
-            print(f"  Subject: {item['subject']}")
+            if on == "whatsapp":
+                # No subject on WhatsApp; the column names the approved template.
+                print(f"  Template: {item['subject'] or '(free text, inside their 24h window)'}")
+            else:
+                print(f"  Subject: {item['subject']}")
             body_preview = (item["body"][:200] + "...") if len(item["body"]) > 200 else item["body"]
             for line in body_preview.splitlines():
                 print(f"    {line}")
@@ -572,6 +579,88 @@ def cmd_outbox(args):
             print("  Nothing awaiting review.\n")
 
     asyncio.run(_outbox())
+
+
+def cmd_whatsapp(args):
+    """WhatsApp through Wasi: check the connection, sync templates, queue an opener."""
+    from sellbird.config import ConfigError, load_config, load_env
+    from sellbird.integrations.mail_provider import get_whatsapp_provider
+    from sellbird.state import StateManager
+
+    try:
+        config = load_config()
+    except ConfigError as e:
+        print(f"\n  {e}\n")
+        raise SystemExit(1)
+    env = load_env()
+    whatsapp = config.channels.whatsapp
+
+    if not whatsapp.enabled:
+        print("\n  The WhatsApp channel is off. Set channels.whatsapp.enabled: true "
+              "in your config file,")
+        print("  put WASI_API_KEY in .env, then run this again.\n")
+        raise SystemExit(1)
+    provider = get_whatsapp_provider(config, env)
+    if provider is None:
+        print("\n  WhatsApp is enabled but not usable: WASI_API_KEY is missing from .env.\n")
+        raise SystemExit(1)
+
+    async def _test():
+        ok, detail = await provider.test_connection()
+        print(f"\n  {'✓' if ok else '✗'} {detail}\n")
+        if ok:
+            problem = await provider.quality_problem()
+            if problem:
+                print(f"  ⚠ {problem}.\n")
+        raise SystemExit(0 if ok else 1)
+
+    async def _templates():
+        templates = await provider.templates()
+        approved = [t for t in templates
+                    if str(t.get("status") or "").lower() == "approved"]
+        print(f"\n  {len(approved)} approved template(s) on this number")
+        print("  " + "=" * 62)
+        for template in sorted(approved, key=lambda t: str(t.get("category") or "")):
+            category = str(template.get("category") or "?")
+            placeholders = list((template.get("body_param_examples") or {}).keys())
+            print(f"\n  {template.get('name')}  [{category}, {template.get('language')}]")
+            if placeholders:
+                print(f"    placeholders: {', '.join(placeholders)}")
+            body = str(template.get("body") or "").strip().splitlines()
+            for line in body[:3]:
+                print(f"    {line}")
+        marketing = [t for t in approved
+                     if str(t.get("category") or "").lower() == "marketing"]
+        print(f"\n  {len(marketing)} of these are Marketing templates. A cold first "
+              "message needs one of those:")
+        print("  Meta re-categorises or pulls a Utility template used for outreach.")
+        print("\n  To let Sellbird check a message before it sends, copy the ones you "
+              "use into")
+        print("  channels.whatsapp.templates (name, category, language, body) and map "
+              "their")
+        print("  placeholders in channels.whatsapp.template_params.\n")
+
+    async def _queue():
+        from sellbird.agents.sender import Sender
+        state = StateManager()
+        await state.init_db()
+        sender = Sender(brain=None, state=state, config=config, env=env)
+        item_id, why = await sender.stage_whatsapp_opener(args.prospect)
+        if why:
+            print(f"\n  Not queued: {why}\n")
+            raise SystemExit(1)
+        print(f"\n  Queued [{item_id}] for your approval.")
+        print("  Read it and approve with: sellbird outbox --channel whatsapp\n")
+
+    async def _backfill():
+        state = StateManager()
+        await state.init_db()
+        filled = await state.backfill_phone_e164(whatsapp.default_country_code)
+        print(f"\n  Normalised {filled} phone number(s) to E.164.\n")
+
+    actions = {"test": _test, "templates": _templates, "queue": _queue,
+               "backfill-phones": _backfill}
+    asyncio.run(actions[args.whatsapp_action]())
 
 
 def cmd_profile(args):
@@ -1217,7 +1306,21 @@ def main():
     sub.add_argument("--approve", metavar="ID", default="", help="Approve one item")
     sub.add_argument("--approve-all", action="store_true", help="Approve all pending")
     sub.add_argument("--reject", metavar="ID", default="", help="Reject one item")
+    sub.add_argument("--channel", default="", choices=["", "email", "whatsapp"],
+                     help="Only one channel (default: both)")
     sub.set_defaults(func=cmd_outbox)
+
+    # sellbird whatsapp
+    sub = subparsers.add_parser("whatsapp", help="WhatsApp through Wasi")
+    sub.add_argument("whatsapp_action",
+                     choices=["test", "templates", "queue", "backfill-phones"],
+                     help="test: check the connection and the number's standing; "
+                          "templates: what Meta has approved; "
+                          "queue: queue a cold opener for one prospect; "
+                          "backfill-phones: normalise stored numbers to E.164")
+    sub.add_argument("--prospect", default="", metavar="ID",
+                     help="Prospect id, for 'queue'")
+    sub.set_defaults(func=cmd_whatsapp)
 
     # sellbird sending pause|resume|status
     sub = subparsers.add_parser("discover", help="Find businesses matching your ICP")

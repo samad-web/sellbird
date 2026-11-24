@@ -460,6 +460,13 @@ main.content { min-width: 0; padding: var(--sp-6) var(--sp-6) 96px; }
 .badge.t-idle::before { background: var(--text-3); }
 .tag { background: var(--surface-2); color: var(--text-2); border-color: var(--line); }
 .tag.accent { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+/* Which channel a row went out on. Email rows carry no mark, so the tables
+   look exactly as they did before WhatsApp existed. */
+.chan {
+  display: inline-flex; align-items: center; margin-left: 6px; padding: 1px 7px;
+  border-radius: 10px; font-size: var(--fs-caption); font-weight: 500; line-height: 1.35;
+  background: var(--note-bg); color: var(--note); border: 1px solid var(--note-line);
+}
 .cost-chip {
   display: inline-flex; align-items: center; min-height: 22px; padding: 2px 8px; border-radius: 11px;
   font-size: var(--fs-caption); font-weight: 500; line-height: 1.35;

@@ -300,3 +300,36 @@ async def test_a_number_that_cannot_be_normalised_is_still_kept_for_a_human(stat
     assert await state.set_prospect_phone(pid, "call the shop") == ""
     assert (await state.get_prospect(pid)).phone == "call the shop"
     assert await state.get_prospect_by_phone("call the shop") is None
+
+
+# ── B5: the CLI and the shipped config ──
+
+def test_the_shipped_config_keeps_the_channel_off():
+    """A clone must never message anyone on WhatsApp by default."""
+    from sellbird.config import load_config
+    config = load_config("sellbird.yaml")
+    assert config.channels.whatsapp.enabled is False
+    assert config.channels.whatsapp.cold_first_touch is False
+
+
+@pytest.mark.parametrize("argv, expected", [
+    (["whatsapp", "--help"], "backfill-phones"),
+    (["outbox", "--help"], "--channel"),
+])
+def test_the_cli_registers_the_whatsapp_command(argv, expected, capsys, monkeypatch):
+    """Through the real entry point: the parser is built inside main()."""
+    import sellbird.cli as cli
+    monkeypatch.setattr("sys.argv", ["sellbird", *argv])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 0
+    assert expected in capsys.readouterr().out
+
+
+def test_the_docs_exist_and_say_the_dangerous_part():
+    """CONTRIBUTING: docs and code change together. This one has to warn."""
+    from pathlib import Path
+    doc = Path("docs/whatsapp.md").read_text(encoding="utf-8")
+    assert "off by default" in doc
+    assert "Marketing" in doc           # the category a cold opener needs
+    assert "24 hours" in doc            # the window
