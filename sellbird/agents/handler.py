@@ -25,7 +25,7 @@ from sellbird.email_style import style_problems, tidy
 from sellbird.humanize import humanize, humanizer_enabled
 from sellbird.integrations.instantly import InstantlyClient
 from sellbird.integrations.mail_provider import (
-    NATIVE_PROVIDERS, get_mail_provider, strip_quoted_reply,
+    NATIVE_PROVIDERS, get_mail_provider, get_whatsapp_provider, strip_quoted_reply,
 )
 from sellbird.models.conversation import Conversation, Message
 from sellbird.send_window import recipient_zone
@@ -646,6 +646,8 @@ class Handler:
         self.env = env
         self.instantly = InstantlyClient(env.instantly_api_key)
         self.provider = get_mail_provider(config, env)
+        # The WhatsApp channel, or None when it is off or unconfigured.
+        self.whatsapp = get_whatsapp_provider(config, env)
         # For extra inboxes' sign-ins (sellbird.mailboxes); None = the keychain.
         self.secrets = None
         self._inbox_providers: dict = {}   # extra inboxes' providers, kept across cycles
@@ -671,11 +673,18 @@ class Handler:
         # Load foundational skills for this agent
         self.skills = self.brain.load_skills_for_agent("handler")
 
+        # WhatsApp is its own channel: read even for an install that uses
+        # nothing else, and before email, so a reply there stops this cycle's
+        # email too (the heartbeat sends only after every reader succeeded).
+        whatsapp_ok = True
+        if self.whatsapp is not None:
+            whatsapp_ok = await self._read_whatsapp()
+
         if not self.config.channels.email.enabled:
-            return True
+            return whatsapp_ok
 
         if self.is_native:
-            return await self._run_native()
+            return await self._run_native() and whatsapp_ok
 
         # 1. Fetch active campaigns
         active_campaigns = await self.state.get_campaigns_by_status("active")
@@ -763,11 +772,13 @@ class Handler:
             PREVIOUS_DEFAULT_OPT_OUT_LINE,
         ])
 
-    async def _suppress(self, email: str, reason: str, source: str) -> None:
-        """Suppress an address; a bad address or a database hiccup never stops
-        the opt-out or bounce handling around it (the status already changed)."""
+    async def _suppress(self, email: str, reason: str, source: str,
+                        kind: str = "address") -> None:
+        """Suppress an address or a phone number; a bad value or a database
+        hiccup never stops the opt-out or bounce handling around it (the
+        status already changed)."""
         try:
-            await self.state.add_suppression("address", email or "", reason, source)
+            await self.state.add_suppression(kind, email or "", reason, source)
         except Exception as e:
             logger.warning(f"Handler: could not suppress {email!r}: {e}")
 
@@ -844,10 +855,18 @@ class Handler:
         reply_uuid: str,
         campaign_id: str = "",
         reply_meta: dict | None = None,
+        channel: str = "email",
     ):
-        """Classify, record, and respond to a single reply."""
-        # Find the prospect by email (indexed lookup)
-        prospect = await self.state.get_prospect_by_email(lead_email)
+        """Classify, record, and respond to a single reply.
+
+        ``lead_email`` is the address it came from, or — on WhatsApp — the
+        E.164 number. Everything after the lookup is the same work: a reply is
+        a reply, and intent, opt-outs, escalation and stop-on-reply have
+        nothing to do with the medium it arrived in.
+        """
+        whatsapp = channel == "whatsapp"
+        prospect = (await self.state.get_prospect_by_phone(lead_email) if whatsapp
+                    else await self.state.get_prospect_by_email(lead_email))
         if not prospect:
             logger.warning(f"Handler: No prospect found for {lead_email}")
             return
@@ -916,7 +935,7 @@ class Handler:
                 id="",
                 prospect_id=prospect.id,
                 campaign_id=campaign_id,
-                channel="email",
+                channel=channel,
                 intent=intent,
                 status="open",
             )
@@ -931,8 +950,9 @@ class Handler:
         held = not self.is_native and legacy_sending_held(self.config)
         # Nothing can be sent to someone on the do-not-contact list, so don't
         # spend a model call drafting; they go to you instead (step 3).
-        listed = do_not_contact_match(prospect.email or lead_email,
-                                      live_do_not_contact(self.config))
+        listed = do_not_contact_match(
+            lead_email if whatsapp else (prospect.email or lead_email),
+            live_do_not_contact(self.config))
         # 2a. They said yes to the offer: hand them to the system that
         # delivers it first, so the reply can carry what it answered.
         handoff = None
@@ -967,8 +987,18 @@ class Handler:
                 convo.id, status="needs_human" if handed_off or escalate else "closed",
                 stage="closed_lost")
             await self.state.update_prospect_status(prospect.id, "opted_out")
-            # Suppressed by address too, so a re-import or another campaign can't reach them.
-            await self._suppress(lead_email, "opted_out", "reply")
+            # Suppressed so a re-import or another campaign can't reach them —
+            # and on every channel, not just the one they said it on. "Stop
+            # messaging me" on WhatsApp is not permission to email instead.
+            if whatsapp:
+                await self._suppress(lead_email, "opted_out", "whatsapp", kind="phone")
+                if prospect.email:
+                    await self._suppress(prospect.email, "opted_out", "whatsapp")
+            else:
+                await self._suppress(lead_email, "opted_out", "reply")
+                if prospect.phone_e164:
+                    await self._suppress(prospect.phone_e164, "opted_out", "reply",
+                                         kind="phone")
             await self.state.log_action(
                 action_type="opt_out",
                 agent="handler",
@@ -1089,7 +1119,12 @@ class Handler:
 
         # Send the response — natively through the outbox approval ladder,
         # or immediately via Instantly (legacy).
-        if self.is_native:
+        if whatsapp:
+            await self._queue_native_reply(
+                response, prospect, convo, reply_meta or {}, intent,
+                channel="whatsapp", recipient=lead_email,
+            )
+        elif self.is_native:
             await self._queue_native_reply(
                 response, prospect, convo, reply_meta or {}, intent
             )
@@ -1227,6 +1262,60 @@ class Handler:
             provider.confirm_read()
         return complete
 
+    async def _read_whatsapp(self) -> bool:
+        """Read inbound WhatsApp and handle it. True only if everything was.
+
+        Same contract as _read_inbox: the heartbeat sends nothing in a cycle
+        where this returned False, because a message that wasn't read can't
+        have stopped the queued messages it should have. The provider's cursor
+        only moves on confirm_read(), so nothing is lost — it is read again.
+        """
+        try:
+            inbound = await self.whatsapp.get_replies()
+        except Exception as e:
+            logger.error(f"Handler: fetching WhatsApp failed: {e}")
+            self.last_read_problem = f"WhatsApp: {e}"
+            return False
+
+        handled = 0
+        complete = True
+        for msg in inbound:
+            dedup_key = msg.provider_id or msg.message_id
+            if not dedup_key or await self.state.is_reply_processed(dedup_key):
+                continue
+            consumed = True
+            try:
+                if msg.body.strip():
+                    await self._process_reply(
+                        msg.from_email,
+                        msg.body.strip(),
+                        reply_uuid="",
+                        reply_meta={"thread_ref": msg.thread_ref,
+                                    "message_id": msg.message_id,
+                                    "subject": ""},
+                        channel="whatsapp",
+                    )
+                handled += 1
+            except BrainUnavailable as e:
+                consumed = False
+                complete = False
+                logger.error(f"Handler: stopping; WhatsApp messages are left for later ({e}).")
+                break
+            except Exception as e:
+                logger.error(f"Handler: error processing WhatsApp from {msg.from_email}: {e}")
+                self.last_read_problem = (
+                    f"a WhatsApp message from {msg.from_email} couldn't be handled ({e})")
+                complete = False
+            finally:
+                if consumed:
+                    await self.state.mark_reply_processed(dedup_key)
+
+        if handled:
+            logger.info(f"Handler: processed {handled} WhatsApp message(s).")
+        if complete:
+            self.whatsapp.confirm_read()
+        return complete
+
     async def _handle_bounce(self, msg):
         """A bounce is a data bug AND a reputation threat. Fix both."""
         outbox_item = await self.state.find_outbox_by_message_id(msg.in_reply_to)
@@ -1276,13 +1365,22 @@ class Handler:
             logger.error(f"Handler: KILL SWITCH ENGAGED — {reason}")
 
     async def _queue_native_reply(
-        self, response: str, prospect, convo, reply_meta: dict, intent: str
+        self, response: str, prospect, convo, reply_meta: dict, intent: str,
+        channel: str = "email", recipient: str = "",
     ):
-        """Route Sellbird's reply through the outbox (approval ladder applies)."""
+        """Route Sellbird's reply through the outbox (approval ladder applies).
+
+        On WhatsApp the reply is free text, which Meta allows because the
+        person wrote first — that is what opened the 24-hour window. Wasi
+        refuses it if the window closes before the user approves, and the
+        Sender then says so on the row rather than sending a template nobody
+        chose.
+        """
         await sync_sending_mode(self.config, self.state)
-        require_approval = getattr(
-            self.config.channels.email, "require_approval", True
-        )
+        whatsapp = channel == "whatsapp"
+        settings = (self.config.channels.whatsapp if whatsapp
+                    else self.config.channels.email)
+        require_approval = getattr(settings, "require_approval", True)
         # The first reply since you undid their opt-out waits for you, even
         # on autopilot: the undo panel promises it.
         review_key = REVIEW_NEXT_REPLY_KEY + prospect.id
@@ -1292,20 +1390,32 @@ class Handler:
         if subject and not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
 
+        if whatsapp:
+            provider_name = self.whatsapp.name if self.whatsapp else ""
+            # No subject line on WhatsApp, and the column must stay empty:
+            # the Sender reads a value there as "this is a template send".
+            subject = ""
+            to = recipient or prospect.phone_e164
+        else:
+            provider_name = self.provider.name if self.provider else ""
+            subject = subject or "Re: your note"
+            to = prospect.email
+
         item_id = await self.state.add_outbox_item(
             prospect_id=prospect.id,
             conversation_id=convo.id,
             kind="reply",
-            to_email=prospect.email,
-            subject=subject or "Re: your note",
+            to_email=to,
+            subject=subject,
             body=response,
             send_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             status="pending_review" if require_approval else "approved",
-            provider=self.provider.name if self.provider else "",
+            provider=provider_name,
             thread_ref=reply_meta.get("thread_ref", ""),
             in_reply_to=reply_meta.get("message_id", ""),
             approved_by="" if require_approval else "autopilot",
             mailbox_id=reply_meta.get("mailbox_id", ""),
+            channel=channel,
         )
         if item_id:
             await self.state.delete_setting(review_key)
