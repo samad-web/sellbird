@@ -4,7 +4,7 @@ import asyncio
 import logging
 import signal
 import sys
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 
 import pytz
 
@@ -102,22 +102,6 @@ def sends_through_quiet_hours(config: SellbirdConfig) -> bool:
                 and email.enabled and email.provider in NATIVE_PROVIDERS)
 
 
-def seconds_until_quiet_hours_end(config: SellbirdConfig) -> int:
-    """Calculate seconds until quiet hours end."""
-    qh = config.usage.quiet_hours
-    tz = pytz.timezone(qh.timezone)
-    now = datetime.now(tz)
-    end = time.fromisoformat(qh.end)
-    end_today = now.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
-
-    if end_today <= now:
-        # End time is tomorrow
-        end_today = end_today + timedelta(days=1)
-
-    delta = end_today - now
-    return max(int(delta.total_seconds()), 60)
-
-
 # When nothing is writable, prospecting pauses for the rest of the day once
 # this many unusable prospects (a guessed, invalid or missing email) were
 # found in the last 24 hours. Without a working verifier every address is a
@@ -152,7 +136,6 @@ def unusable_backlog_notice(summary: dict) -> str:
 
 
 async def decide_next_action(
-    brain: Brain,
     state: StateManager,
     config: SellbirdConfig,
     summary: dict | None = None,
@@ -334,8 +317,11 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             quiet = in_quiet_hours(config)
             send_only = quiet and sender.is_native and sends_through_quiet_hours(config)
             if quiet and not send_only:
-                sleep_for = seconds_until_quiet_hours_end(config)
-                logger.info(f"Quiet hours. Sleeping for {sleep_for // 60} minutes.")
+                quiet_hours = config.usage.quiet_hours
+                logger.info(
+                    f"Quiet hours until {quiet_hours.end} ({quiet_hours.timezone}). "
+                    f"Checking every {QUIET_HOURS_POLL_SECONDS // 60} minutes."
+                )
                 # Sleep in short polled chunks rather than one multi-hour
                 # wait: found in production that a system sleep/wake cycle
                 # during a long asyncio.wait_for left the process silently
@@ -402,7 +388,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             else:
                 logger.info("Checking pipeline state...")
                 summary = await state.get_state_summary()
-                action = await decide_next_action(brain, state, config, summary=summary)
+                action = await decide_next_action(state, config, summary=summary)
 
             # 5. Execute — run independent agents in parallel where possible
             # Handler is always safe to run alongside other agents

@@ -25,8 +25,11 @@ every request passes, in order:
    Two tokens are accepted: the user's (``data/dashboard-token``, used by the
    dashboard UI) and the coding agent's (``data/agent-token``, used through
    the MCP server). The guard records which one matched as the request's
-   principal (``request.state.principal``: ``"user"`` or ``"agent"``); routes
-   that only the user may call check it (``dashboard.require_user``).
+   principal (``request.state.principal``: ``"user"`` or ``"agent"``). What the
+   agent's token may then reach is an allowlist, enforced by a second middleware
+   inside this one: ``sellbird/agent_policy.py``. Every route not on that list
+   answers 403 to the agent, so a route added later is the user's alone until
+   someone decides otherwise.
 5. Mutations with a body must be ``application/json``.
 
 Each token is created once in its own file, ``data/dashboard-token`` or

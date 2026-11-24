@@ -76,7 +76,7 @@ async def test_a_batch_that_keeps_failing_stops_after_a_few_attempts(state):
     assert await status(state, pid) == "write_failed"
     # The heartbeat moves on to prospecting instead of writing again.
     summary = await state.get_state_summary()
-    assert await decide_next_action(None, state, CONFIG, summary=summary) == "prospect"
+    assert await decide_next_action(state, CONFIG, summary=summary) == "prospect"
     calls = brain.calls
     await writer.run()
     assert brain.calls == calls  # no more model calls for it

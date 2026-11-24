@@ -23,7 +23,10 @@ from sellbird.config import (
     compliance_of, live_do_not_contact, operator_timezone, send_window_of,
 )
 from sellbird import extensions
-from sellbird.gate import autopilot_review, do_not_contact_match, pre_send_check
+from sellbird.gate import (
+    EMAIL_RE, autopilot_review, do_not_contact_match, pre_send_check,
+    sendable_email_statuses,
+)
 from sellbird.send_hooks import NO_HEADERS_HOLD, SendCheck, SendHookError, extra_headers, first_verdict
 from sellbird.send_window import in_window, next_send_time, recipient_country, recipient_zone
 from sellbird.integrations.instantly import InstantlyClient
@@ -37,8 +40,8 @@ from sellbird.mailboxes import Inboxes, load_inboxes
 from sellbird.sending_mode import SIGNATURE_HOLD_PREFIX, sync_sending_mode
 from sellbird.state import (
     AUTOPILOT_OFF_REASON, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
-    MANUAL_SEND_KEY, MAYBE_SENT_PREFIX, MOVED_BACK_PREFIXES, RECHECK_PREFIX,
-    UNKNOWN_HOLD_PREFIX, StateManager,
+    KILL_SWITCH_KEY, MANUAL_SEND_KEY, MAYBE_SENT_PREFIX, MOVED_BACK_PREFIXES,
+    RECHECK_PREFIX, UNKNOWN_HOLD_PREFIX, StateManager,
 )
 
 # A follow-up waits at least this long after the email it follows went out,
@@ -66,20 +69,11 @@ CHECK_SECONDS_PER_CYCLE = 90
 # Prospect pipeline statuses that mean "stop emailing this person".
 STOP_STATUSES = {"replied", "opted_out", "lost", "meeting", "closed"}
 
-KILL_SWITCH_KEY = "sending_paused"
-BOUNCE_COUNT_KEY = "bounce_count"
-
-EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 
 # Only prospects in these statuses may be added as leads. This guarantees
 # we never re-send to someone already contacted, replied, opted out, or lost.
 SENDABLE_STATUSES = {"new", "queued"}
 
-# Email confidence levels safe to send to. "verified" only by default;
-# "risky" (catch-all domains) is opt-in via config. Never send to a "guess"
-# or "invalid" address — that bounces and burns the sending domain.
-SENDABLE_EMAIL_STATUSES = {"verified"}
-SENDABLE_EMAIL_STATUSES_WITH_RISKY = {"verified", "risky"}
 
 
 def _utcnow() -> datetime:
@@ -426,10 +420,7 @@ class Sender:
 
         # 3. Add leads — validated, deduped, never-contacted, deliverable-only
         allow_risky = getattr(self.config.channels.email, "send_to_risky", False)
-        sendable_email = (
-            SENDABLE_EMAIL_STATUSES_WITH_RISKY if allow_risky
-            else SENDABLE_EMAIL_STATUSES
-        )
+        sendable_email = sendable_email_statuses(allow_risky)
         prospects = []
         seen_emails: set[str] = set()
         skipped_unverified = 0
@@ -654,10 +645,7 @@ class Sender:
         )
         initial_status = "pending_review" if require_approval else "approved"
         allow_risky = getattr(self.config.channels.email, "send_to_risky", False)
-        sendable_email = (
-            SENDABLE_EMAIL_STATUSES_WITH_RISKY if allow_risky
-            else SENDABLE_EMAIL_STATUSES
-        )
+        sendable_email = sendable_email_statuses(allow_risky)
 
         staged = 0
         skipped = 0

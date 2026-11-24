@@ -121,10 +121,8 @@ async def test_sender_only_sends_verified(state, monkeypatch):
     sender = Sender(brain=None, state=state, config=_Cfg(), env=Env())
 
     # Filter logic mirrors _deploy_campaign's lead selection.
-    from sellbird.agents.sender import (
-        SENDABLE_EMAIL_STATUSES, SENDABLE_EMAIL_STATUSES_WITH_RISKY,
-    )
-    allowed = SENDABLE_EMAIL_STATUSES
+    from sellbird.gate import sendable_email_statuses
+    allowed = sendable_email_statuses(False)
     sendable = []
     for status, pid in ids.items():
         p = await state.get_prospect(pid)
@@ -134,7 +132,7 @@ async def test_sender_only_sends_verified(state, monkeypatch):
     assert sendable[0].email_status == "verified"
 
     # With risky enabled, two become sendable
-    allowed = SENDABLE_EMAIL_STATUSES_WITH_RISKY
+    allowed = sendable_email_statuses(True)
     sendable = [
         await state.get_prospect(pid) for status, pid in ids.items()
         if (await state.get_prospect(pid)).email_status in allowed

@@ -286,8 +286,9 @@ class EmailChannelConfig(BaseModel):
     # Your own phone numbers. On autopilot, an email giving any other number
     # waits in the Outbox (a planted "call this number instead" can't go out).
     phone_numbers: list[str] = []
-    # Kill switch: pause all sending when bounces exceed this fraction of
-    # sent mail (measured over the trailing sends). 0 disables the switch.
+    # Kill switch: pause all sending when bounces exceed this fraction of the
+    # last state.BOUNCE_RATE_WINDOW sent emails (bounces and sends counted from
+    # the same moment, so it is a real trailing rate). 0 disables the switch.
     max_bounce_rate: float = 0.05
     # false = a campaign stages only its first email. Follow-ups (steps 2 and
     # 3) are not prepared, so none can go out to someone who never answered;

@@ -213,7 +213,7 @@ def cmd_dashboard(args):
 
 def cmd_status(args):
     """Show current pipeline status."""
-    from sellbird.state import StateManager
+    from sellbird.state import BOUNCE_COUNT_KEY, StateManager
 
     async def _status():
         state = StateManager()
@@ -825,7 +825,6 @@ def cmd_warmup(args):
     from dotenv import load_dotenv
 
     from sellbird import deliverability as d
-    from sellbird.agents.handler import BOUNCE_COUNT_KEY
     from sellbird.config import ConfigError, load_config
     from sellbird.paths import PROJECT_ROOT
     from sellbird.state import StateManager

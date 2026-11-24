@@ -444,6 +444,82 @@ async def test_bounce_marks_invalid_and_kill_switch(state):
 
 
 @pytest.mark.asyncio
+async def test_bounces_from_a_previous_provider_do_not_pause_native_sending(state):
+    """Audit finding 2: the rate must describe the mail it is a rate of.
+
+    A user who ran on Instantly collects bounces in the lifetime counter while
+    the outbox stays empty (Instantly never passes through it). Switching to a
+    native provider used to charge all of those against the first ten outbox
+    sends and pause sending on day one.
+    """
+    pid = await seed_prospect(state, status="contacted")
+    # The Instantly era, a month ago: 40 bounces, no outbox rows.
+    for _ in range(40):
+        await state.increment_setting("bounce_count")
+        await state.log_action(action_type="bounce", agent="handler")
+    last_month = (datetime.now(timezone.utc).replace(tzinfo=None)
+                  - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    async with state._connect() as db:
+        await db.execute("UPDATE actions SET created_at = ? WHERE action_type = 'bounce'",
+                         (last_month,))
+        await db.commit()
+
+    # Now on a native provider: eleven clean sends, the last one bouncing.
+    item_id = await state.add_outbox_item(
+        prospect_id=pid, to_email="jane@acme.com", subject="s", body="b",
+        send_at=_now_iso(), status="approved", campaign_id="c1", step=1,
+    )
+    await state.update_outbox_item(
+        item_id, status="sent", message_id="<m1@x>", sent_at=_now_iso())
+    for i in range(10):
+        oid = await state.add_outbox_item(
+            prospect_id=pid, to_email="jane@acme.com", subject="s", body="b",
+            send_at=_now_iso(), status="approved", campaign_id=f"c{i + 2}", step=1,
+        )
+        await state.update_outbox_item(oid, status="sent", sent_at=_now_iso())
+
+    provider = FakeProvider()
+    provider.inbound = [InboundMessage(
+        provider_id="b1", from_email="mailer-daemon@googlemail.com",
+        subject="Delivery Status Notification (Failure)",
+        body="couldn't be delivered", in_reply_to="<m1@x>", is_bounce=True,
+    )]
+    await make_handler(state, provider)._run_native()
+
+    # 1 bounce in the window / 11 sends = 9%... which is over 5%, so this
+    # alone would still trip. What must NOT happen is the 40 old ones counting.
+    bounces, sent = await state.trailing_bounce_rate()
+    assert (bounces, sent) == (1, 11)
+    # The lifetime tally `sellbird warmup` shows is untouched by the change.
+    assert int(await state.get_setting("bounce_count")) == 41
+
+
+@pytest.mark.asyncio
+async def test_a_clean_list_after_a_bad_one_does_not_stay_paused(state):
+    """The window is trailing, so old bounces age out of the rate."""
+    pid = await seed_prospect(state, status="contacted")
+    # Two bounces long ago, then 300 clean sends since.
+    old = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)).isoformat()
+    for i in range(2):
+        oid = await state.add_outbox_item(
+            prospect_id=pid, to_email="jane@acme.com", subject="s", body="b",
+            send_at=old, status="approved", campaign_id=f"old{i}", step=1,
+        )
+        await state.update_outbox_item(oid, status="sent", sent_at=old)
+        await state.log_action(action_type="bounce", agent="handler")
+    for i in range(300):
+        oid = await state.add_outbox_item(
+            prospect_id=pid, to_email="jane@acme.com", subject="s", body="b",
+            send_at=_now_iso(), status="approved", campaign_id=f"new{i}", step=1,
+        )
+        await state.update_outbox_item(oid, status="sent", sent_at=_now_iso())
+
+    bounces, sent = await state.trailing_bounce_rate()
+    assert sent == 200          # the window, not all 302
+    assert bounces == 0         # the old bounces fell outside it
+
+
+@pytest.mark.asyncio
 async def test_inbound_dedup(state):
     await seed_prospect(state, status="contacted")
     provider = FakeProvider()

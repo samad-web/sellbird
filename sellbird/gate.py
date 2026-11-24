@@ -35,7 +35,17 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 MERGE_TAG_RE = re.compile(r"\{\{\s*\w+\s*\}\}|\{\s*\w+\s*\}(?!\})")
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
-DELIVERABLE_STATUSES = {"verified", "risky"}
+# Email statuses a cold email may go to. "risky" is a catch-all domain: it
+# accepts everything, so a wrong guess still bounces, which is why it is
+# opt-in via channels.email.send_to_risky. One definition, because the gate
+# and the Sender must never disagree about what may go out.
+VERIFIED_ONLY = frozenset({"verified"})
+DELIVERABLE_STATUSES = frozenset({"verified", "risky"})
+
+
+def sendable_email_statuses(allow_risky: bool) -> frozenset:
+    """The email statuses that may be sent to under this setting."""
+    return DELIVERABLE_STATUSES if allow_risky else VERIFIED_ONLY
 
 
 @dataclass
@@ -199,7 +209,7 @@ def pre_send_check(
     if prospect is not None:
         if (prospect.email or "").strip().lower() != to_email:
             reasons.append("recipient does not match the prospect record")
-        allowed = DELIVERABLE_STATUSES if allow_risky else {"verified"}
+        allowed = sendable_email_statuses(allow_risky)
         # Replies go back to someone who emailed US — deliverability proven.
         if kind == "sequence" and (prospect.email_status or "guess") not in allowed:
             reasons.append(

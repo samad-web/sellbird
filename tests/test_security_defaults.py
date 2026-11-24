@@ -134,17 +134,17 @@ async def test_held_drafts_do_not_block_writing_or_prospecting(new, expected):
     # starve the writer and scout forever.
     from sellbird.main import decide_next_action
     summary = {"prospects": {"new": new}, "draft_campaigns": 1, "open_conversations": 0}
-    assert await decide_next_action(None, None, legacy_config(), summary=summary) == expected
+    assert await decide_next_action(None, legacy_config(), summary=summary) == expected
 
 
 @pytest.mark.asyncio
 async def test_drafts_still_deploy_on_instantly_autopilot_and_native_providers():
     from sellbird.main import decide_next_action
     summary = {"prospects": {"new": 30}, "draft_campaigns": 1, "open_conversations": 0}
-    assert await decide_next_action(None, None, legacy_config(False), summary=summary) == "send_campaign"
+    assert await decide_next_action(None, legacy_config(False), summary=summary) == "send_campaign"
     native = legacy_config()
     native.channels.email.provider = "gmail"
-    assert await decide_next_action(None, None, native, summary=summary) == "send_campaign"
+    assert await decide_next_action(None, native, summary=summary) == "send_campaign"
 
 
 def test_held_instantly_is_announced_plainly():

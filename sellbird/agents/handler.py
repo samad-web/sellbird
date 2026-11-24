@@ -29,15 +29,16 @@ from sellbird.integrations.mail_provider import (
 )
 from sellbird.models.conversation import Conversation, Message
 from sellbird.send_window import recipient_zone
-from sellbird.state import COLLEAGUE_REPLIED, REVIEW_NEXT_REPLY_KEY, StateManager
+from sellbird.state import (
+    BOUNCE_COUNT_KEY, COLLEAGUE_REPLIED, KILL_SWITCH_KEY, REVIEW_NEXT_REPLY_KEY,
+    StateManager,
+)
 from sellbird.sending_mode import sync_sending_mode
 from sellbird.startups import startup_facts
 from sellbird.untrusted import UNTRUSTED_RULE, fence
 
 logger = logging.getLogger("sellbird.handler")
 
-KILL_SWITCH_KEY = "sending_paused"
-BOUNCE_COUNT_KEY = "bounce_count"
 # Kill switch only engages after this many sends (a tiny sample lies).
 MIN_SENDS_FOR_KILL_SWITCH = 10
 
@@ -1251,23 +1252,24 @@ class Handler:
                 "match it to a sent email."
             )
 
-        bounces = await self.state.increment_setting(BOUNCE_COUNT_KEY)
-        total_sent = await self.state.count_outbox_sent()
+        lifetime = await self.state.increment_setting(BOUNCE_COUNT_KEY)
+        # Logged before the rate is read, so this bounce is counted in it.
         await self.state.log_action(
             action_type="bounce",
             agent="handler",
             details={"prospect": prospect.email if prospect else "unknown",
-                     "bounces": bounces, "total_sent": total_sent},
+                     "bounces": lifetime},
         )
 
         max_rate = getattr(self.config.channels.email, "max_bounce_rate", 0.05)
+        bounces, total_sent = await self.state.trailing_bounce_rate()
         if (
             max_rate > 0
             and total_sent >= MIN_SENDS_FOR_KILL_SWITCH
             and bounces / total_sent > max_rate
         ):
             reason = (
-                f"bounce rate {bounces}/{total_sent} exceeded "
+                f"bounce rate {bounces}/{total_sent} of the last sends exceeded "
                 f"{max_rate:.0%} — check list quality before resuming"
             )
             await self.state.set_setting(KILL_SWITCH_KEY, reason)

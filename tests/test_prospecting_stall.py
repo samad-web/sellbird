@@ -50,7 +50,7 @@ async def test_guessed_emails_alone_lead_back_to_prospecting(state):
     for n in range(3):
         await add(state, n, f"p{n}@co{n}.test", "guess")
     summary = await state.get_state_summary()
-    assert await decide_next_action(None, state, CONFIG, summary=summary) == "prospect"
+    assert await decide_next_action(state, CONFIG, summary=summary) == "prospect"
 
 
 async def age_all(state, days):
@@ -72,7 +72,7 @@ async def test_a_day_of_unusable_prospects_pauses_spending_and_says_why(state):
     for n in range(PROSPECT_BACKLOG):
         await add(state, n, f"p{n}@co{n}.test", "guess")
     summary = await state.get_state_summary()
-    assert await decide_next_action(None, state, CONFIG, summary=summary) == "idle"
+    assert await decide_next_action(state, CONFIG, summary=summary) == "idle"
     notice = unusable_backlog_notice(summary)
     assert str(PROSPECT_BACKLOG) in notice and "verifier" in notice and "about a day" in notice
 
@@ -86,7 +86,7 @@ async def test_the_pause_never_becomes_permanent(state):
         await add(state, n, f"p{n}@co{n}.test", "guess")
     await age_all(state, days=2)
     summary = await state.get_state_summary()
-    assert await decide_next_action(None, state, CONFIG, summary=summary) == "prospect"
+    assert await decide_next_action(state, CONFIG, summary=summary) == "prospect"
     assert unusable_backlog_notice(summary) == ""
 
 
@@ -97,11 +97,11 @@ async def test_old_guesses_do_not_stop_a_mixed_setup_returning_to_prospecting(st
     await age_all(state, days=3)
     await add(state, 100, "v@verified.test", "verified")
     summary = await state.get_state_summary()
-    assert await decide_next_action(None, state, CONFIG, summary=summary) == "write_campaign"
+    assert await decide_next_action(state, CONFIG, summary=summary) == "write_campaign"
     [verified] = [p for p in await state.get_prospects_by_status("new") if p.email_status == "verified"]
     await state.update_prospect_status(verified.id, "queued")  # what the Writer does
     summary = await state.get_state_summary()
-    assert await decide_next_action(None, state, CONFIG, summary=summary) == "prospect"
+    assert await decide_next_action(state, CONFIG, summary=summary) == "prospect"
 
 
 @pytest.mark.asyncio
@@ -120,14 +120,14 @@ async def test_a_deliverable_prospect_is_still_written_for(state):
     await add(state, 1, "p1@co1.test", "guess")
     await add(state, 2, "p2@co2.test", "verified")
     summary = await state.get_state_summary()
-    assert await decide_next_action(None, state, CONFIG, summary=summary) == "write_campaign"
+    assert await decide_next_action(state, CONFIG, summary=summary) == "write_campaign"
 
 
 @pytest.mark.asyncio
 async def test_a_summary_without_the_new_count_keeps_the_old_rule():
     # Callers that build their own summary (older tests, scripts) still work.
     summary = {"prospects": {"new": 3}, "draft_campaigns": 0, "open_conversations": 0}
-    assert await decide_next_action(None, None, CONFIG, summary=summary) == "write_campaign"
+    assert await decide_next_action(None, CONFIG, summary=summary) == "write_campaign"
 
 
 def email_config(**email):
@@ -141,7 +141,7 @@ async def test_drafts_with_the_email_channel_off_do_not_starve_prospecting():
     # a draft stays a draft and choosing send_campaign for it never ends.
     summary = {"prospects": {"new": 0}, "draft_campaigns": 1, "open_conversations": 0}
     assert await decide_next_action(
-        None, None, email_config(enabled=False), summary=summary) == "prospect"
+        None, email_config(enabled=False), summary=summary) == "prospect"
 
 
 @pytest.mark.asyncio
@@ -149,11 +149,11 @@ async def test_native_drafts_while_sending_is_paused_do_not_starve_prospecting()
     # The kill switch stops native staging, not finding or writing.
     summary = {"prospects": {"new": 0}, "draft_campaigns": 1,
                "open_conversations": 0, "sending_paused": True}
-    assert await decide_next_action(None, None, email_config(), summary=summary) == "prospect"
+    assert await decide_next_action(None, email_config(), summary=summary) == "prospect"
     summary["prospects"] = {"new": 2}
-    assert await decide_next_action(None, None, email_config(), summary=summary) == "write_campaign"
+    assert await decide_next_action(None, email_config(), summary=summary) == "write_campaign"
     summary["sending_paused"] = False
-    assert await decide_next_action(None, None, email_config(), summary=summary) == "send_campaign"
+    assert await decide_next_action(None, email_config(), summary=summary) == "send_campaign"
 
 
 @pytest.mark.asyncio
@@ -169,9 +169,9 @@ async def test_an_open_conversation_does_not_starve_prospecting():
     # every cycle for days without ever prospecting again. The handler rides
     # along each cycle instead, so the pipeline keeps moving.
     summary = {"prospects": {"new": 0}, "draft_campaigns": 0, "open_conversations": 1}
-    assert await decide_next_action(None, None, CONFIG, summary=summary) == "prospect"
+    assert await decide_next_action(None, CONFIG, summary=summary) == "prospect"
     summary = {"prospects": {"new": 3}, "draft_campaigns": 0, "open_conversations": 1}
-    assert await decide_next_action(None, None, CONFIG, summary=summary) == "write_campaign"
+    assert await decide_next_action(None, CONFIG, summary=summary) == "write_campaign"
 
 
 @pytest.mark.asyncio

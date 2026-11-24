@@ -39,6 +39,14 @@ WRITABLE_EMAIL_STATUSES = ("verified", "risky")
 # dashboard. Its value is the status they had before, so undo is exact; its
 # presence tells the Sender never to email them as well.
 MANUAL_SEND_KEY = "manual_send:"
+# Kill switch for all outbound, and the lifetime bounce tally `sellbird warmup`
+# shows. Defined here because the Sender, the Handler and the CLI all use them,
+# and two copies of a settings key drift.
+KILL_SWITCH_KEY = "sending_paused"
+BOUNCE_COUNT_KEY = "bounce_count"
+# How many of the most recent sends the bounce rate is measured over. A rate
+# needs one population: bounces and sends counted from the same moment.
+BOUNCE_RATE_WINDOW = 200
 # Outbox cancel reason for mail the user sent by hand instead; undo restores it.
 HAND_SENT_REASON = "sent_by_hand"
 # Set when you undo someone's opt-out: Sellbird's first reply to them after
@@ -1575,6 +1583,56 @@ class StateManager:
                 "SELECT COUNT(*) FROM outbox WHERE status = 'sent'"
             ) as cursor:
                 return (await cursor.fetchone())[0]
+
+    async def trailing_bounce_rate(
+        self, window: int = BOUNCE_RATE_WINDOW
+    ) -> tuple[int, int]:
+        """(bounces, sends) over the last ``window`` sent emails.
+
+        Both are counted from one moment — when the oldest send still inside
+        the window went out — so the rate describes the same mail. The
+        lifetime ``bounce_count`` setting divided by the outbox's send count
+        is not a rate: it charges bounces from a previous provider (or ones
+        that matched no sent email) against the first few outbox sends, and
+        pauses a user's sending on their tenth native email.
+
+        Fewer than ``window`` sends: the cutoff is simply the oldest send, so a
+        bounce that arrived before this mailbox ever sent anything is never
+        counted against it. No sends at all: (0, 0), and the caller's minimum
+        sample stops it dividing.
+        """
+        async with self._connect() as db:
+            # The oldest send still inside the window. sent_at is always written
+            # here as a naive-UTC isoformat string, so text order is time order
+            # and text comparison is exact. Not datetime(): that truncates to
+            # whole seconds, and a batch sent inside one second would all tie.
+            async with db.execute(
+                "SELECT MIN(sent_at) FROM (SELECT sent_at FROM outbox "
+                "WHERE status = 'sent' AND sent_at IS NOT NULL "
+                "ORDER BY sent_at DESC LIMIT ?)",
+                (max(int(window), 1),),
+            ) as cursor:
+                row = await cursor.fetchone()
+            since = (row[0] if row else "") or ""
+            if not since:
+                return 0, 0
+            async with db.execute(
+                "SELECT COUNT(*) FROM outbox WHERE status = 'sent' AND sent_at >= ?",
+                (since,),
+            ) as cursor:
+                sent = (await cursor.fetchone())[0]
+            # actions.created_at is SQLite's CURRENT_TIMESTAMP: a space instead
+            # of the "T" and no microseconds, so it needs datetime() on both
+            # sides or text comparison puts every bounce before the cutoff. The
+            # cost is a one-second fuzz at the window's edge, which is nothing
+            # against a window of BOUNCE_RATE_WINDOW sends.
+            async with db.execute(
+                "SELECT COUNT(*) FROM actions WHERE action_type = 'bounce' "
+                "AND datetime(created_at) >= datetime(?)",
+                (since,),
+            ) as cursor:
+                bounces = (await cursor.fetchone())[0]
+        return bounces, sent
 
     async def count_outbox_sent_today(self, kind: str | None = None,
                                       since: str | None = None,
