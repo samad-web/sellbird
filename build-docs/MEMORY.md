@@ -51,10 +51,18 @@ company phones. No new collector.
 
 ## Known issues (see build-docs/AUDIT.md)
 
-- `bounce_count` is a lifetime counter compared against an outbox-only send count, so
-  switching Instantly → a native provider can trip the global kill switch at the first
-  10 sends.
-- `KILL_SWITCH_KEY`, `BOUNCE_COUNT_KEY` and `EMAIL_RE` are each defined twice; the
-  deliverable-email-status rule exists under two names in two modules.
-- `dashboard_auth.py`'s docstring points at `dashboard.require_user`, which does not
-  exist (the real enforcement is `sellbird/agent_policy.py`).
+Findings 1-10 (first pass) are fixed. Findings 11-18 (second pass) are open; the three
+that matter:
+
+- **11** `sellbird export` writes scraped company names and notes into CSV unescaped,
+  so a hostile site can run a spreadsheet formula on the user's machine.
+- **12** The SMTP provider's IMAP read marks a message `Seen` as a side effect and has
+  no `confirm_read`, so a reply that arrives while Claude is down is lost for good and
+  its stop-on-reply never runs.
+- **13** A failed MX lookup is cached forever and read as "cannot receive mail", so one
+  DNS blip marks every prospect at that domain `invalid`, which is terminal.
+
+And one decision for the user, not a patch: **14** — `CLAUDE.md` states Sellbird never
+reads LinkedIn because their terms forbid scraping, while the repo ships a 433-line
+Playwright LinkedIn scraper that the setup steps tell users to install a browser for.
+Delete the module or correct the claim.

