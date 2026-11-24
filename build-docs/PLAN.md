@@ -1,6 +1,6 @@
 # PLAN — audit fixes + WhatsApp channel (Wasi)
 
-Status: **awaiting approval.** Nothing in here is implemented yet.
+Status: **done** (approved and built 2026-11-24). Phase A and B1-B5 are committed on `fix/audit-findings` and `feat/whatsapp-channel`; results in `TESTING.md`, per-commit summary in `CHANGELOG.md`.
 
 ## Goal and scope
 
@@ -86,3 +86,40 @@ and finding 9's phone opt-out can't work either.
 8. Phone format expected (E.164 with or without `+`).
 
 A `curl` example of a successful send and one inbound payload would cover most of this.
+
+---
+
+## Deliberately not built
+
+Named here so nobody has to guess whether they were forgotten:
+
+- **Cohort-wide WhatsApp queueing.** Openers are queued one prospect at a time
+  (`sellbird whatsapp queue --prospect <id>`). Fanning a template out across a
+  cohort is one command away, and it is the command that would get a number banned,
+  so it waits for the user to ask.
+- **WhatsApp in the Writer.** A cold opener is an approved template with its
+  placeholders filled, so there is nothing for the model to write. Free-text
+  *replies* already go through the Writer's reply path.
+- **Media, buttons and list messages.** Wasi supports interactive sends
+  (`type: "interactive"`, 1-3 buttons, or a list); Sellbird sends text and templates
+  only.
+- **A WhatsApp tab on the dashboard.** The Outbox, Conversations and Activity tabs
+  now mark the channel; Wasi is itself a WhatsApp inbox, so a second one here would
+  be a worse copy of it.
+- **Audit finding 10** (Playwright as a hard dependency). Left alone: `CLAUDE.md`
+  relies on Playwright being present so Claude can open a prospect's site and check
+  a draft's claims. Moving it to an extra would need the setup wizard to install it
+  by default, which is a bigger change than the finding is worth.
+
+## Still open
+
+- **The one thing only the user can do:** get an approved **Marketing** template
+  suitable for a cold opener. All four current Marketing templates are post-demo or
+  post-sale follow-ups (missed-call, post-demo, won,
+  lost), so `cold_first_touch` cannot be used yet — by design, since
+  the Sender refuses a non-Marketing template for a first message.
+- Three gaps in Wasi itself, listed at the end of `features/whatsapp-channel.md`:
+  no `updated_after` filter on `/conversations` (so nothing past the newest 100 is
+  readable), template parameters not validated before the Meta call, and
+  `client_id` required in the send body although the API key already identifies the
+  client.
