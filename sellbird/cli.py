@@ -213,7 +213,7 @@ def cmd_dashboard(args):
 
 def cmd_status(args):
     """Show current pipeline status."""
-    from sellbird.state import BOUNCE_COUNT_KEY, StateManager
+    from sellbird.state import StateManager
 
     async def _status():
         state = StateManager()
@@ -933,6 +933,7 @@ def cmd_warmup(args):
         raise SystemExit(1)
 
     async def _history():
+        from sellbird.state import BOUNCE_COUNT_KEY
         state = StateManager()
         await state.init_db()
         return (await state.count_outbox_sent(),

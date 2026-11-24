@@ -36,6 +36,12 @@ class SendResult:
     # The provider may have accepted the message (timeout, dropped connection,
     # 5xx after the request went out). Never retry: the Sender marks it unknown.
     uncertain: bool = False
+    # The provider's own error code, and the upstream one it is reporting
+    # (WhatsApp: Meta's numeric code). Decisions read these, never the error
+    # text: Meta puts its code in the message for some failures and not
+    # others, so matching on the string silently misses half of them.
+    error_code: str = ""
+    upstream_code: int | None = None
 
 
 @dataclass(frozen=True)

@@ -431,3 +431,54 @@ async def test_housekeeping_failures_never_hold_sending(state):
 
     handler = _handler(state, provider)
     assert await handler.run() is True        # still a clean read
+
+
+@pytest.mark.asyncio
+async def test_a_late_failure_is_matched_on_either_id(state):
+    """Review finding 5.
+
+    send_email stores Meta's id when Wasi returns one and falls back to
+    Wasi's own. The sweep matched only on meta_message_id, so a send stored
+    under the fallback was never attributed to its row.
+    """
+    pid = await _prospect(state)
+    item = await state.add_outbox_item(
+        prospect_id=pid, to_email=WA, subject="", body="hi",
+        send_at=_now_iso(), status="approved", channel="whatsapp", provider="wasi",
+    )
+    # Stored under Wasi's own id, as happens when Meta's is absent.
+    await state.update_outbox_item(
+        item, status="sent", sent_at=_now_iso(),
+        message_id="wasi-row-1", thread_ref="chat-1")
+
+    provider = FakeWasi([])
+
+    async def failed_messages(chat_ids):
+        return [{"id": "wasi-row-1", "meta_message_id": None, "status": "failed",
+                 "meta_error_code": "131026",      # a string, as JSON may give it
+                 "error_reason": "Message undeliverable", "chat_id": "chat-1"}]
+    provider.failed_messages = failed_messages
+
+    await _handler(state, provider).run()
+
+    assert (await state.get_outbox_item(item))["status"] == "failed"
+    # And the string code was still read as a dead number (finding 14).
+    assert await state.is_suppressed(WA) == "bounced"
+
+
+@pytest.mark.asyncio
+async def test_a_shared_company_number_resolves_to_whoever_was_contacted(state):
+    """Review finding 10: phone_e164 is not unique, so order must not be luck."""
+    from sellbird.models.prospect import Prospect
+
+    # Two colleagues on one company line. The second was the one emailed.
+    for first, status in (("Ada", "new"), ("Dana", "contacted")):
+        await state.add_prospect(Prospect(
+            first_name=first, last_name="Doe", title="Owner", company="Acme",
+            email=f"{first.lower()}@example.com", email_status="verified",
+            phone=WA, status=status))
+
+    found = await state.get_prospect_by_phone(WA)
+    assert found is not None and found.first_name == "Dana"
+    # Stable across calls, not the database's whim.
+    assert (await state.get_prospect_by_phone(WA)).id == found.id

@@ -228,7 +228,8 @@ class Sender:
         if await self.state.get_setting(KILL_SWITCH_KEY):
             return False
         email = self.config.channels.email
-        if email.max_daily_sends - await self.state.count_outbox_sent_today() <= 0:
+        if email.max_daily_sends - await self.state.count_outbox_sent_today(
+                channel="email") <= 0:
             return False
         inboxes = await self._load_inboxes()
         if inboxes.several:
@@ -240,7 +241,7 @@ class Sender:
                 return False
             midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
             if cold_daily_cap(email) - await self.state.count_outbox_sent_today(
-                    kind="sequence",
+                    kind="sequence", channel="email",
                     since=midnight.astimezone(timezone.utc).replace(tzinfo=None).isoformat()) <= 0:
                 return False
         now = _utcnow()
@@ -869,12 +870,26 @@ class Sender:
         )
         if not gate:
             logger.warning(
-                f"Sender: gate blocked email to {item['to_email']}: "
+                f"Sender: gate blocked the message to {item['to_email']}: "
                 f"{gate.reasons}"
             )
+            # A reply that is only too long is an edit away from sendable, so
+            # it waits for a human instead of becoming a dead row — otherwise
+            # the person's question is answered by nobody. Everything else the
+            # gate stops (a bad recipient, a suppressed address, markup) is
+            # terminal, as before.
+            if (item["kind"] == "reply"
+                    and all("too long" in reason for reason in gate.reasons)):
+                return "pending_review", (HELD_FOR_REVIEW + "; ".join(gate.reasons))[:300]
             return "failed", "gate: " + "; ".join(gate.reasons)[:300]
+        # Each channel has its own approval setting, so a WhatsApp row must be
+        # judged by channels.whatsapp.require_approval. Reading email's for
+        # every channel sent WhatsApp autopilot rows back for review for ever,
+        # since email defaults to requiring approval.
+        channel_settings = (getattr(self.config.channels, "whatsapp", None)
+                            if channel == "whatsapp" else self.config.channels.email)
         if (item.get("approved_by") == "autopilot"
-                and getattr(self.config.channels.email, "require_approval", True)):
+                and getattr(channel_settings, "require_approval", True)):
             # Autopilot approved it, and autopilot has since been turned off.
             return "pending_review", AUTOPILOT_OFF_REASON
         if item.get("approved_by") != "you":
@@ -925,7 +940,10 @@ class Sender:
             return
 
         max_daily = self.config.channels.email.max_daily_sends
-        sent_today = await self.state.count_outbox_sent_today()
+        # Email only: channels.email.max_daily_sends is email's cap, and
+        # WhatsApp has its own. Counting both here meant a WhatsApp message
+        # silently took an email out of the day's allowance.
+        sent_today = await self.state.count_outbox_sent_today(channel="email")
         # Each inbox sends up to MAX_SENDS_PER_CYCLE a cycle; max_daily_sends
         # stays the ceiling on everything sent in a day.
         per_cycle = MAX_SENDS_PER_CYCLE * (len(inboxes.sendable()) if inboxes else 1)
@@ -938,7 +956,7 @@ class Sender:
         cold_cap = cold_daily_cap(self.config.channels.email)
         midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
         cold_left = cold_cap - await self.state.count_outbox_sent_today(
-            kind="sequence",
+            kind="sequence", channel="email",
             since=midnight.astimezone(timezone.utc).replace(tzinfo=None).isoformat())
 
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
@@ -1419,8 +1437,14 @@ class Sender:
         prospect = await self.state.get_prospect(prospect_id)
         if prospect is None:
             return "", "no such prospect"
-        number = prospect.phone_e164 or normalize_phone(
-            prospect.phone, whatsapp.default_country_code)
+        number = prospect.phone_e164
+        if not number:
+            # Normalised here for the first time: it must be stored, not just
+            # used. An inbound message is matched on phone_e164, so sending to
+            # a number the record doesn't carry makes the reply unattributable
+            # — and an unattributable reply is an opt-out that never lands.
+            number = await self.state.set_prospect_phone(
+                prospect.id, prospect.phone, whatsapp.default_country_code)
         if not number:
             return "", (f"no usable phone number for {prospect.full_name()} "
                         f"({prospect.phone or 'none on file'})")
@@ -1482,6 +1506,13 @@ class Sender:
                              "Fix the cause before sending more.")
                 await self.state.note_sends_held(f"WhatsApp: {problem}")
                 return
+        if self.cold_only and whatsapp.send_window is None:
+            # Quiet hours. The heartbeat only reaches the Sender at all because
+            # cold EMAIL is due in a recipient's own window; WhatsApp has no
+            # window configured, so sending now would be the operator's 3am.
+            logger.info("Sender: quiet hours and channels.whatsapp.send_window is "
+                        "not set — WhatsApp waits for the morning.")
+            return
         budget, why_not = await self._whatsapp_budget()
         if budget <= 0:
             logger.info(f"Sender: no WhatsApp this cycle — {why_not}.")
@@ -1566,7 +1597,7 @@ class Sender:
     async def _whatsapp_failed(self, item: dict, prospect, result) -> None:
         """A send Wasi or Meta refused."""
         error = result.error or "the send failed"
-        if WINDOW_CLOSED in error:
+        if getattr(result, "error_code", "") == WINDOW_CLOSED:
             # Not a failure of this message: it needs to be a template, or to
             # wait until the person writes again. Keep it, say why.
             await self.state.update_outbox_item(
@@ -1576,13 +1607,23 @@ class Sender:
                        "instead, or wait for them to write.")[:300])
             logger.info(f"Sender: {item['to_email']} is outside the 24-hour window.")
             return
-        if any(f"{code}" in error for code in DEAD_NUMBER_META_CODES):
+        # Meta's own numeric code, not the message text: Meta puts the code in
+        # the message for some failures ("(#131009) ...") and not others
+        # ("Message undeliverable" is 131026), so a substring match silently
+        # missed half the dead numbers and never suppressed them.
+        if getattr(result, "upstream_code", None) in DEAD_NUMBER_META_CODES:
             # WhatsApp's hard bounce: this number will never receive anything.
             await self.state.update_outbox_item(
                 item["id"], status="failed", error=error[:300])
             if prospect is not None:
+                # The number stays on the record, and keeps its E.164 form, so
+                # the suppression below can still be matched to this person.
+                # Passing no default_code would have blanked phone_e164 for any
+                # number that only normalises with one.
                 await self.state.set_prospect_phone(
-                    prospect.id, prospect.phone, verified=False)
+                    prospect.id, prospect.phone,
+                    self.config.channels.whatsapp.default_country_code,
+                    verified=False)
                 await self.state.add_suppression(
                     "phone", item["to_email"], reason="bounced", source="whatsapp")
                 cancelled = await self.state.cancel_pending_outbox_for_prospect(

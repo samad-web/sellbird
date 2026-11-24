@@ -322,7 +322,8 @@ async def test_a_closed_24_hour_window_holds_the_message_and_explains(state):
     pid = await _prospect(state)
     provider = FakeWasi()
     provider.result = SendResult(
-        ok=False, error="session_window_closed: This chat is outside the 24-hour window")
+        ok=False, error="session_window_closed: This chat is outside the 24-hour window",
+        error_code="session_window_closed")
     sender = _sender(state, _config(), provider)
     item_id = await _approved(state, sender, pid)
 
@@ -346,7 +347,8 @@ async def test_a_number_not_on_whatsapp_is_suppressed_and_email_is_untouched(sta
     provider.result = SendResult(
         ok=False,
         error="send_failed: (#131009) Parameter value is not valid — "
-              "The phone number is malformed")
+              "The phone number is malformed",
+        error_code="send_failed", upstream_code=131009)
     sender = _sender(state, _config(), provider)
     item_id = await _approved(state, sender, pid)
 
@@ -414,3 +416,156 @@ async def test_a_whatsapp_failure_never_stops_email(state):
     sender._drain_whatsapp = _boom
 
     await sender.run()      # must not raise
+
+
+# ── Regressions found by the code review of this feature ──
+
+@pytest.mark.asyncio
+async def test_queueing_stores_the_number_it_sends_to(state):
+    """Review finding 2.
+
+    The opener normalised the phone for sending but never wrote it back, so
+    an inbound reply could not be matched to the prospect — which means the
+    opt-out in that reply never landed.
+    """
+    pid = await _prospect(state, phone="1632 960001")
+    config = _config(whatsapp={"default_country_code": "+44"})
+    sender = _sender(state, config, FakeWasi())
+
+    item_id, why = await sender.stage_whatsapp_opener(pid)
+    assert item_id, why
+
+    row = await state.get_outbox_item(item_id)
+    assert row["to_email"] == "+441632960001"
+    # The record now carries the same number, so the reply is attributable.
+    assert (await state.get_prospect(pid)).phone_e164 == "+441632960001"
+    found = await state.get_prospect_by_phone("+441632960001")
+    assert found is not None and found.id == pid
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_autopilot_uses_its_own_approval_setting(state):
+    """Review finding 3.
+
+    _blocked read channels.email.require_approval for every channel, so a
+    WhatsApp row approved by autopilot was sent back for review for ever,
+    because email requires approval by default.
+    """
+    pid = await _prospect(state)
+    provider = FakeWasi()
+    config = _config(whatsapp={"require_approval": False})
+    config.channels.email.require_approval = True      # the default
+    sender = _sender(state, config, provider)
+
+    item_id, why = await sender.stage_whatsapp_opener(pid)
+    assert item_id, why
+    assert (await state.get_outbox_item(item_id))["status"] == "approved"
+
+    await sender._drain_whatsapp()
+
+    assert len(provider.sent) == 1
+    assert (await state.get_outbox_item(item_id))["status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_a_dead_number_is_caught_when_meta_omits_the_code(state):
+    """Review finding 4.
+
+    Meta writes its code into the message for some failures ("(#131009) ...")
+    and not others ("Message undeliverable" is 131026). Matching the text
+    missed the second kind, so those numbers were never suppressed.
+    """
+    pid = await _prospect(state)
+    provider = FakeWasi()
+    provider.result = SendResult(
+        ok=False, error="send_failed: Message undeliverable",
+        error_code="send_failed", upstream_code=131026)
+    sender = _sender(state, _config(), provider)
+    item_id = await _approved(state, sender, pid)
+
+    await sender._drain_whatsapp()
+
+    assert (await state.get_outbox_item(item_id))["status"] == "failed"
+    assert await state.is_suppressed(WA) == "bounced"
+    # The number keeps its E.164 form, or the suppression could not be
+    # matched back to this person.
+    assert (await state.get_prospect(pid)).phone_e164 == WA
+
+
+@pytest.mark.asyncio
+async def test_a_failure_to_read_the_account_is_not_a_maybe_sent(state):
+    """Review finding 8: nothing was sent, so the row must not be stranded."""
+    from sellbird.integrations.wasi import WasiError, WasiProvider
+
+    pid = await _prospect(state)
+
+    class Env2:
+        wasi_api_key = "k"
+        wasi_api_base_url = ""
+
+    provider = WasiProvider(config=_config(), env=Env2())
+
+    async def _no_account():
+        raise WasiError("Wasi unreachable")
+    provider.client_id = _no_account
+
+    result = await provider.send_email(WA, "", "hi", template="t", params={})
+    assert result.ok is False
+    assert result.uncertain is False          # nothing left the machine
+    assert "nothing sent" in result.error
+    assert pid      # (prospect fixture used; the point is the result above)
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_does_not_eat_the_email_allowance(state):
+    """Review finding 7: the two channels have separate caps."""
+    pid = await _prospect(state)
+    for _ in range(3):
+        item = await state.add_outbox_item(
+            prospect_id=pid, to_email=WA, subject="", body="b",
+            send_at=_now_iso(), status="approved", channel="whatsapp",
+            provider="wasi", campaign_id=f"w{_}", step=1,
+        )
+        await state.update_outbox_item(item, status="sent", sent_at=_now_iso())
+
+    assert await state.count_outbox_sent_today(channel="email") == 0
+    assert await state.count_outbox_sent_today(channel="whatsapp") == 3
+    assert await state.count_outbox_sent_today() == 3       # the whole install
+
+
+@pytest.mark.asyncio
+async def test_whatsapp_waits_for_morning_when_it_has_no_send_window(state):
+    """Review finding 12: quiet hours are the operator's night."""
+    pid = await _prospect(state)
+    provider = FakeWasi()
+    sender = _sender(state, _config(), provider)
+    await _approved(state, sender, pid)
+    # The heartbeat sets this in quiet hours when cold EMAIL is due in a
+    # recipient's own window. WhatsApp has no window configured.
+    sender.cold_only = True
+
+    await sender._drain_whatsapp()
+    assert provider.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_is_only_too_long_waits_instead_of_dying(state):
+    """Review finding 11: the person's question must not go unanswered."""
+    pid = await _prospect(state)
+    provider = FakeWasi()
+    sender = _sender(state, _config(), provider)
+    item_id = await state.add_outbox_item(
+        prospect_id=pid, to_email=WA, subject="", body="word " * 300,
+        send_at=_now_iso(), status="approved", channel="whatsapp",
+        provider="wasi", kind="reply",
+    )
+
+    await sender._drain_whatsapp()
+
+    row = await state.get_outbox_item(item_id)
+    assert row["status"] == "pending_review"
+    # Held, not failed: an over-long reply is an edit away from sendable. The
+    # writing rules catch the length before the gate does, so the wording is
+    # theirs; what matters is that it waits rather than dying.
+    assert "120 or fewer" in row["error"] or "too long" in row["error"]
+    assert provider.sent == []

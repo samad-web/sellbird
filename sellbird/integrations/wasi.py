@@ -179,9 +179,10 @@ class WasiProvider(MailProvider):
                         raise WasiError(last) from e
                     continue
                 if response.status_code in RETRYABLE_STATUS and safe_to_retry:
+                    # The backoff happens at the top of the next iteration, so
+                    # sleeping here too would wait twice for one attempt.
                     last = f"HTTP {response.status_code}"
                     if attempt < retries:
-                        await asyncio.sleep(self._retry_delay(attempt, response))
                         continue
                 try:
                     body = response.json()
@@ -290,14 +291,23 @@ class WasiProvider(MailProvider):
             payload.update(type="template", template=template, params=params or {})
         else:
             payload.update(type="text", body=body)
+        # Resolved before the send, and outside the try below: a failed
+        # /account read means nothing was ever sent, so it must not come back
+        # as "may have gone out" and strand the row as permanently failed.
         try:
             payload["client_id"] = await self.client_id()
+        except WasiError as e:
+            return SendResult(ok=False, uncertain=False, error_code="no_client_id",
+                              error=f"Wasi account unreadable, nothing sent: "
+                                    f"{self._redact(str(e))}"[:300])
+        try:
             sent = await self._request("POST", "/messages", json=payload)
         except WasiResponseError as e:
             # A refusal Wasi made itself: nothing was handed to Meta, so the
             # message did not go out and the row is safe to hold or fail.
             return SendResult(ok=False, error=f"{e.code}: {e.detail}"[:300],
-                              uncertain=False)
+                              uncertain=False, error_code=e.code,
+                              upstream_code=e.meta_code)
         except WasiError as e:
             # The request may have arrived: never retried, never resent.
             return SendResult(ok=False, error=self._redact(str(e))[:300], uncertain=True)
@@ -312,7 +322,7 @@ class WasiProvider(MailProvider):
 
     # ── inbound ──
 
-    async def get_replies(self, limit: int = 50) -> list[InboundMessage]:
+    async def get_replies(self, limit: int = MAX_PAGE) -> list[InboundMessage]:
         """Inbound WhatsApp messages since the last confirmed read.
 
         Two steps, because Wasi has no "messages since X" endpoint: list the
@@ -321,14 +331,19 @@ class WasiProvider(MailProvider):
         only moves when the Handler confirms it handled everything, so a
         message is read again rather than lost.
         """
+        asked = max(min(int(limit), MAX_PAGE), 1)
         threads = await self._request(
-            "GET", "/conversations", params={"limit": min(int(limit), MAX_PAGE)})
+            "GET", "/conversations", params={"limit": asked})
         rows = [t for t in (threads or []) if isinstance(t, dict)]
-        if len(rows) >= MAX_PAGE:
-            # Wasi ignores offset/since, so this is the whole page there is.
+        if len(rows) >= asked:
+            # Wasi ignores offset/since/page, so this is every thread Sellbird
+            # can see. Past this many, a reply can be missed — which is worth
+            # a warning rather than silence. Compared with what was asked for,
+            # not with MAX_PAGE: a smaller page truncates sooner.
             logger.warning(
-                "Wasi returned the maximum %s conversations: any thread with new "
-                "inbound beyond that is not visible this cycle.", MAX_PAGE)
+                "Wasi returned the %s conversations asked for, so a reply in an "
+                "older thread is not visible this cycle. Wasi has no "
+                "'updated_after' filter; see docs/whatsapp.md.", asked)
         fresh = [t for t in rows
                  if str(t.get("last_inbound_at") or "") > self._cursor]
         inbound: list[InboundMessage] = []

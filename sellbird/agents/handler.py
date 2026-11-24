@@ -1383,10 +1383,20 @@ class Handler:
             [row.get("thread_ref") or "" for row in recent])
         found = 0
         for failure in failures:
-            row = by_message.get(str(failure.get("meta_message_id") or ""))
+            # send_email stores Meta's id when it has one and falls back to
+            # Wasi's own, so the sweep has to look up either. Matching only on
+            # meta_message_id left those sends unattributable.
+            row = next((by_message[key] for key in
+                        (str(failure.get("meta_message_id") or ""),
+                         str(failure.get("id") or ""))
+                        if key and key in by_message), None)
             if row is None:
                 continue
             code = failure.get("meta_error_code")
+            try:
+                code = int(code) if code is not None else None
+            except (TypeError, ValueError):
+                code = None
             reason = str(failure.get("error_reason") or f"Meta error {code}")
             await self.state.update_outbox_item(
                 row["id"], status="failed",

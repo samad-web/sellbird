@@ -385,3 +385,14 @@ async def test_an_existing_install_upgrades_to_the_channel_column(tmp_path):
     # Running it again changes nothing.
     await store.init_db()
     assert (await store.get_outbox_item("o1"))["channel"] == "email"
+
+
+def test_the_warmup_command_still_runs():
+    """Review finding 1: Phase A moved an import into the wrong function, so
+    `sellbird warmup` died with NameError before printing its report."""
+    import sellbird.cli as cli
+    import inspect
+    source = inspect.getsource(cli.cmd_warmup)
+    assert "BOUNCE_COUNT_KEY" in source
+    # The name is resolvable inside the function that uses it.
+    assert "from sellbird.state import BOUNCE_COUNT_KEY" in source

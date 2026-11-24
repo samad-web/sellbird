@@ -1019,8 +1019,18 @@ class StateManager:
             return None
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
+            # Several people can share one company line, so the number is not
+            # unique and the order must not be the database's whim: whoever
+            # was actually contacted on it owns the reply, and the earliest
+            # record breaks a remaining tie. Without this, the same reply
+            # could stop one colleague's sequence today and another's
+            # tomorrow.
             async with db.execute(
-                "SELECT * FROM prospects WHERE phone_e164 = ?", (wanted,)
+                "SELECT * FROM prospects WHERE phone_e164 = ? "
+                "ORDER BY CASE WHEN status IN ('contacted', 'replied', 'meeting') "
+                "THEN 0 WHEN status = 'queued' THEN 1 ELSE 2 END, created_at, id "
+                "LIMIT 1",
+                (wanted,),
             ) as cursor:
                 row = await cursor.fetchone()
                 return self._prospect_from_row(row) if row else None
