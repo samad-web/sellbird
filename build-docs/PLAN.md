@@ -115,9 +115,9 @@ Named here so nobody has to guess whether they were forgotten:
 
 - **The one thing only the user can do:** get an approved **Marketing** template
   suitable for a cold opener. All four current Marketing templates are post-demo or
-  post-sale follow-ups (missed-call, post-demo, won,
-  lost), so `cold_first_touch` cannot be used yet — by design, since
-  the Sender refuses a non-Marketing template for a first message.
+  post-sale follow-ups (missed-call, post-demo, won, lost), so `cold_first_touch`
+  cannot be used yet — by design, since the Sender refuses a non-Marketing template
+  for a first message.
 - Three gaps in Wasi itself, listed at the end of `features/whatsapp-channel.md`:
   no `updated_after` filter on `/conversations` (so nothing past the newest 100 is
   readable), template parameters not validated before the Meta call, and
