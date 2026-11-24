@@ -25,18 +25,23 @@ from sellbird.config import (
 from sellbird import extensions
 from sellbird.gate import (
     EMAIL_RE, autopilot_review, do_not_contact_match, pre_send_check,
-    sendable_email_statuses,
+    render_template, sendable_email_statuses, template_mismatch,
+    template_placeholders,
 )
 from sellbird.send_hooks import NO_HEADERS_HOLD, SendCheck, SendHookError, extra_headers, first_verdict
 from sellbird.send_window import in_window, next_send_time, recipient_country, recipient_zone
 from sellbird.integrations.instantly import InstantlyClient
-from sellbird.integrations.mail_provider import NATIVE_PROVIDERS, get_mail_provider
+from sellbird.integrations.mail_provider import (
+    NATIVE_PROVIDERS, get_mail_provider, get_whatsapp_provider,
+)
 from sellbird.integrations.precleared import (
     UNKNOWN_ATTEMPTS, UNKNOWN_RETRY_AFTER, PreclearedClient, clear_hold, record_hold,
 )
 from sellbird.integrations.signature import signature_problem
+from sellbird.integrations.wasi import DEAD_NUMBER_META_CODES, WINDOW_CLOSED
 from sellbird.email_style import style_problems
 from sellbird.mailboxes import Inboxes, load_inboxes
+from sellbird.phone import normalize as normalize_phone
 from sellbird.sending_mode import SIGNATURE_HOLD_PREFIX, sync_sending_mode
 from sellbird.state import (
     AUTOPILOT_OFF_REASON, COLLEAGUE_REPLIED, HAND_SENT_REASON, HELD_FOR_REVIEW,
@@ -101,6 +106,8 @@ class Sender:
         self.env = env
         self.instantly = InstantlyClient(env.instantly_api_key)
         self.provider = get_mail_provider(config, env)
+        # The WhatsApp channel, or None when it is off or unconfigured.
+        self.whatsapp = get_whatsapp_provider(config, env)
         # Every inbox this cycle may send from (sellbird.mailboxes), read once
         # per run; None outside a run. Tests pass a SecretStore for extra inboxes.
         self.inboxes: Inboxes | None = None
@@ -281,6 +288,13 @@ class Sender:
 
     async def run(self):
         """Deploy campaigns — natively through the outbox, or via Instantly."""
+        if self.whatsapp is not None:
+            # Its own channel: it runs even for an install that only uses
+            # WhatsApp, and a failure there never stops email going out.
+            try:
+                await self._drain_whatsapp()
+            except Exception as e:
+                logger.error(f"Sender: the WhatsApp drain failed: {e}")
         if not self.config.channels.email.enabled:
             logger.info("Sender: Email channel disabled. Skipping.")
             return
@@ -741,8 +755,10 @@ class Sender:
         return body.rstrip() + "\n\n" + footer
 
     def _outgoing_body(self, item: dict) -> str:
-        """The exact body that goes out: cold email gets the footer, replies don't."""
-        if item["kind"] == "sequence":
+        """The exact body that goes out: cold email gets the footer, replies
+        don't, and WhatsApp never does — Meta puts a Block button on every
+        message, so a postal address there only eats the character budget."""
+        if item["kind"] == "sequence" and (item.get("channel") or "email") == "email":
             return self._with_footer(item["body"])
         return item["body"]
 
@@ -825,21 +841,31 @@ class Sender:
             colleague = await self.state.colleague_who_replied(prospect.id)
             if colleague:
                 return "cancelled", f"{COLLEAGUE_REPLIED} ({colleague})"
+        channel = item.get("channel") or "email"
         # Sellbird's writing rules (no dashes, no exclamation marks, no AI
         # phrases): a draft that breaks them waits for an edit instead of
         # going out. Length and shape were checked when it was written, so an
         # edit you made on purpose isn't second-guessed here.
-        style = style_problems(item["subject"], item["body"],
-                               kind="reply" if item["kind"] == "reply" else "cold",
-                               names=_names(prospect), shape=False)
+        #
+        # A WhatsApp template is exempt: its words are the user's own, already
+        # approved by Meta, and Sellbird did not write them. Holding every cold
+        # WhatsApp message because an approved template has an exclamation mark
+        # would hold them all, for ever, with no edit that could help.
+        templated = bool(channel == "whatsapp" and item.get("subject"))
+        style = [] if templated else style_problems(
+            item["subject"] if channel == "email" else "", item["body"],
+            kind="reply" if item["kind"] == "reply" else "cold",
+            names=_names(prospect), shape=False)
         if style:
-            logger.warning(f"Sender: holding email to {item['to_email']}: {style}")
-            return "pending_review", (HELD_FOR_REVIEW + "the email " + "; ".join(style))[:300]
+            logger.warning(f"Sender: holding message to {item['to_email']}: {style}")
+            return "pending_review", (HELD_FOR_REVIEW + "the message " + "; ".join(style))[:300]
         gate = pre_send_check(
-            item["to_email"], item["subject"], self._outgoing_body(item),
+            item["to_email"], item["subject"] if channel == "email" else "",
+            self._outgoing_body(item),
             prospect=prospect, allow_risky=allow_risky, kind=item["kind"],
             postal_address=compliance_of(self.config).postal_address,
             do_not_contact=live_do_not_contact(self.config),
+            channel=channel,
         )
         if not gate:
             logger.warning(
@@ -1296,8 +1322,287 @@ class Sender:
                         f"({sent_today + sent}/{max_daily} today).")
 
 
+    # ── WhatsApp (channels.whatsapp, through Wasi) ────────────────────────────
+    #
+    # A separate drain, on purpose. It shares everything that is about reaching a
+    # person — the outbox ladder, _blocked (suppressions, stop-on-reply, the gate,
+    # autopilot review), claim-then-send, the daily cap, the kill switch — and
+    # none of what is about email: no Precleared check, no inbox routing, no
+    # signature, no warmup ramp, no CAN-SPAM footer, no follow-up spacing.
+    # Threading WhatsApp through _drain_due would have meant a dozen more
+    # `if channel == "email"` branches in the most load-bearing function in the
+    # repo. This is shorter and cannot change how email behaves.
+
+
+    async def _whatsapp_budget(self) -> tuple[int, str]:
+        """(how many may go now, why not) for this cycle."""
+        whatsapp = self.config.channels.whatsapp
+        sent_today = await self.state.count_outbox_sent_today(channel="whatsapp")
+        budget = min(MAX_SENDS_PER_CYCLE, whatsapp.max_daily_sends - sent_today)
+        if budget <= 0:
+            return 0, (f"today's WhatsApp cap is used up "
+                       f"({sent_today}/{whatsapp.max_daily_sends})")
+        # Meta's own allowance for the next 24 hours beats any local guess.
+        try:
+            remaining = await self.whatsapp.remaining_today()
+        except Exception as e:
+            # Can't read the limit: send nothing rather than risk the number.
+            return 0, f"Meta's messaging limit couldn't be read ({e})"
+        if remaining is not None and remaining <= 0:
+            return 0, "Meta's 24-hour messaging limit for this number is used up"
+        if remaining is not None:
+            budget = min(budget, remaining)
+        return max(budget, 0), ""
+
+    def _template_for(self, item: dict):
+        """(template, params_expressions) for a templated row, or (None, {})."""
+        whatsapp = self.config.channels.whatsapp
+        name = (item.get("subject") or "").strip()
+        if not name:
+            return None, {}
+        return whatsapp.template(name), dict(whatsapp.template_params or {})
+
+    async def _whatsapp_payload(self, item: dict, prospect) -> tuple[dict, str]:
+        """What to hand the provider, or ({}, reason) when it must not go.
+
+        A templated row is re-rendered here from the approved template and the
+        current config, then compared with the text that was approved in the
+        Outbox. If they differ, the config changed after a human said yes, so
+        the message waits for a human again rather than quietly sending words
+        nobody reviewed.
+        """
+        name = (item.get("subject") or "").strip()
+        if not name:
+            return {}, ""        # free text, inside the 24-hour window
+        template, expressions = self._template_for(item)
+        if template is None:
+            return {}, (f"template '{name}' isn't in channels.whatsapp.templates — "
+                        "run `sellbird whatsapp templates`")
+        if (template.category or "").strip().lower() != "marketing" and item["kind"] == "sequence":
+            # Utility templates are for messages about an existing
+            # relationship. Opening a cold conversation with one is the policy
+            # breach Meta punishes by re-categorising or pulling the template.
+            return {}, (f"template '{name}' is a {template.category or 'non-Marketing'} "
+                        "template; a cold first message needs an approved Marketing one")
+        params = {key: self._render(expression, prospect)
+                  for key, expression in expressions.items()}
+        missing = [p for p in template_placeholders(template.body) if not params.get(p)]
+        if missing:
+            return {}, (f"template '{name}' needs {', '.join(missing)} — add them to "
+                        "channels.whatsapp.template_params")
+        rendered = render_template(template.body, params)
+        if _collapse(rendered) != _collapse(item["body"]):
+            return {}, ("the template or its parameters changed after this was "
+                        "approved, so it no longer matches what you read")
+        problem = template_mismatch(rendered, template.body)
+        if problem:
+            return {}, problem
+        return {"template": template.name, "params": params}, ""
+
+    async def stage_whatsapp_opener(self, prospect_id: str) -> tuple[str, str]:
+        """Queue one cold WhatsApp opener for a prospect. (row id, why not).
+
+        Queued, not sent: it joins the Outbox at pending_review like anything
+        else. Deliberately one prospect at a time, called by the CLI or the
+        dashboard — WhatsApp openers do not ride along with email campaigns,
+        because contacting someone on two channels at once is a decision the
+        user makes, not a side effect of turning the channel on.
+        """
+        whatsapp = self.config.channels.whatsapp
+        if not whatsapp.enabled:
+            return "", "the WhatsApp channel is off (channels.whatsapp.enabled)"
+        if not whatsapp.cold_first_touch:
+            return "", ("cold first contact on WhatsApp is off "
+                        "(channels.whatsapp.cold_first_touch)")
+        if self.whatsapp is None:
+            return "", "WASI_API_KEY is not set in .env"
+        prospect = await self.state.get_prospect(prospect_id)
+        if prospect is None:
+            return "", "no such prospect"
+        number = prospect.phone_e164 or normalize_phone(
+            prospect.phone, whatsapp.default_country_code)
+        if not number:
+            return "", (f"no usable phone number for {prospect.full_name()} "
+                        f"({prospect.phone or 'none on file'})")
+        if prospect.status not in SENDABLE_STATUSES:
+            return "", f"prospect status '{prospect.status}' is not sendable"
+        suppressed = await self.state.is_suppressed(number)
+        if suppressed:
+            return "", f"suppressed ({suppressed})"
+        template = whatsapp.template(whatsapp.cold_template)
+        if template is None:
+            return "", (f"template '{whatsapp.cold_template}' isn't in "
+                        "channels.whatsapp.templates — run `sellbird whatsapp templates`")
+        params = {key: self._render(expression, prospect)
+                  for key, expression in (whatsapp.template_params or {}).items()}
+        missing = [p for p in template_placeholders(template.body) if not params.get(p)]
+        if missing:
+            return "", (f"template '{template.name}' needs {', '.join(missing)} — add "
+                        "them to channels.whatsapp.template_params")
+        body = render_template(template.body, params)
+        problem = template_mismatch(body, template.body)
+        if problem:
+            return "", problem
+        await sync_sending_mode(self.config, self.state)
+        require_approval = whatsapp.require_approval
+        item_id = await self.state.add_outbox_item(
+            prospect_id=prospect.id,
+            to_email=number,
+            # WhatsApp has no subject, so the column carries which approved
+            # template this is. The drain re-renders it and checks the match.
+            subject=template.name,
+            body=body,
+            send_at=_utcnow().isoformat(),
+            status="pending_review" if require_approval else "approved",
+            channel="whatsapp",
+            provider=self.whatsapp.name,
+            approved_by="" if require_approval else "autopilot",
+        )
+        if not item_id:
+            return "", "already queued"
+        await self.state.queue_prospect_if_unsent(prospect.id)
+        return item_id, ""
+
+    async def _drain_whatsapp(self):
+        """Send due, approved WhatsApp rows through Wasi."""
+        paused = await self.state.get_setting(KILL_SWITCH_KEY)
+        if paused:
+            logger.warning(f"Sender: WhatsApp held, sending is paused ({paused}).")
+            return
+        whatsapp = self.config.channels.whatsapp
+        if whatsapp.pause_below_green:
+            try:
+                problem = await self.whatsapp.quality_problem()
+            except Exception as e:
+                logger.warning(f"Sender: couldn't read the WhatsApp number's standing ({e}) "
+                               "— holding WhatsApp this cycle.")
+                return
+            if problem:
+                logger.error(f"Sender: no WhatsApp sent — {problem}. "
+                             "Fix the cause before sending more.")
+                await self.state.note_sends_held(f"WhatsApp: {problem}")
+                return
+        budget, why_not = await self._whatsapp_budget()
+        if budget <= 0:
+            logger.info(f"Sender: no WhatsApp this cycle — {why_not}.")
+            return
+
+        now = _utcnow().isoformat()
+        due = await self.state.get_outbox(
+            status="approved", due_before=now, limit=budget * 3, channel="whatsapp")
+        if not due:
+            return
+        window = whatsapp.send_window
+        sent = 0
+        outside_window = 0
+        for item in due:
+            if sent >= budget:
+                break
+            if self.cold_only and item["kind"] != "sequence":
+                continue
+            prospect = await self.state.get_prospect(item["prospect_id"])
+            blocked = await self._blocked(item, prospect, allow_risky=False)
+            if blocked:
+                await self.state.update_outbox_item(
+                    item["id"], status=blocked[0], error=blocked[1])
+                continue
+            if (window is not None and item["kind"] == "sequence"
+                    and await self._outside_window(
+                        item, await self._zone_or_default(prospect), window)):
+                outside_window += 1
+                continue
+            payload, reason = await self._whatsapp_payload(item, prospect)
+            if reason:
+                logger.warning(f"Sender: holding WhatsApp to {item['to_email']}: {reason}")
+                await self.state.update_outbox_item(
+                    item["id"], status="pending_review",
+                    error=(HELD_FOR_REVIEW + reason)[:300])
+                continue
+            if not await self.state.claim_outbox_item(item["id"]):
+                continue
+            item = await self.state.get_outbox_item(item["id"]) or item
+            prospect = await self.state.get_prospect(item["prospect_id"])
+            blocked = await self._blocked(item, prospect, allow_risky=False)
+            if blocked:
+                await self.state.update_outbox_item(
+                    item["id"], status=blocked[0], error=blocked[1])
+                continue
+            try:
+                result = await self.whatsapp.send_email(
+                    item["to_email"], "", item["body"],
+                    thread_ref=item.get("thread_ref", ""), **payload)
+            except Exception as e:
+                await self.state.update_outbox_item(
+                    item["id"], status="failed",
+                    error=f"{MAYBE_SENT_PREFIX}WhatsApp send error: {e}"[:300])
+                logger.warning(f"Sender: WhatsApp send to {item['to_email']} raised: {e}")
+                continue
+            if not result.ok:
+                await self._whatsapp_failed(item, prospect, result)
+                continue
+            sent += 1
+            await self.state.update_outbox_item(
+                item["id"], status="sent", sent_at=_utcnow().isoformat(),
+                message_id=result.message_id, thread_ref=result.thread_ref, error="")
+            if prospect.status in ("new", "queued"):
+                await self.state.update_prospect_status(prospect.id, "contacted")
+            await self.state.log_action(
+                action_type="whatsapp_sent", agent="sender",
+                details={"to": item["to_email"], "kind": item["kind"],
+                         "template": payload.get("template", ""),
+                         "step": item["step"]},
+            )
+            logger.info(f"Sender: WhatsApp sent to {item['to_email']}"
+                        + (f" (template {payload['template']})" if payload.get("template") else ""))
+            if self.send_pacing and sent < budget:
+                await asyncio.sleep(random.uniform(*SEND_JITTER_SECONDS))
+
+        if outside_window:
+            logger.info(f"Sender: {outside_window} WhatsApp message(s) wait for the "
+                        f"recipient's send window.")
+        if sent:
+            logger.info(f"Sender: {sent} WhatsApp message(s) sent this cycle.")
+
+    async def _whatsapp_failed(self, item: dict, prospect, result) -> None:
+        """A send Wasi or Meta refused."""
+        error = result.error or "the send failed"
+        if WINDOW_CLOSED in error:
+            # Not a failure of this message: it needs to be a template, or to
+            # wait until the person writes again. Keep it, say why.
+            await self.state.update_outbox_item(
+                item["id"], status="pending_review",
+                error=(HELD_FOR_REVIEW + "WhatsApp only allows free text within 24 "
+                       "hours of their last message. Send an approved template "
+                       "instead, or wait for them to write.")[:300])
+            logger.info(f"Sender: {item['to_email']} is outside the 24-hour window.")
+            return
+        if any(f"{code}" in error for code in DEAD_NUMBER_META_CODES):
+            # WhatsApp's hard bounce: this number will never receive anything.
+            await self.state.update_outbox_item(
+                item["id"], status="failed", error=error[:300])
+            if prospect is not None:
+                await self.state.set_prospect_phone(
+                    prospect.id, prospect.phone, verified=False)
+                await self.state.add_suppression(
+                    "phone", item["to_email"], reason="bounced", source="whatsapp")
+                cancelled = await self.state.cancel_pending_outbox_for_prospect(
+                    prospect.id, reason="whatsapp number unreachable")
+                logger.warning(
+                    f"Sender: {item['to_email']} is not reachable on WhatsApp — "
+                    f"suppressed, {cancelled} queued message(s) cancelled. Email is "
+                    "unaffected.")
+            return
+        prefix = MAYBE_SENT_PREFIX if getattr(result, "uncertain", False) else ""
+        await self.state.update_outbox_item(
+            item["id"], status="failed", error=f"{prefix}{error}"[:300])
+        logger.warning(f"Sender: WhatsApp to {item['to_email']} failed: {error}")
+
 def _names(prospect) -> list[str]:
     """The prospect's own name and company: never read as an AI tell."""
     if prospect is None:
         return []
     return [n for n in (prospect.company, prospect.first_name, prospect.last_name) if n]
+
+
+def _collapse(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()

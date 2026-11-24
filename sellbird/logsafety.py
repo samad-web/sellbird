@@ -20,12 +20,21 @@ _SECRET_PARAM = re.compile(
     re.IGNORECASE,
 )
 
+# Bearer tokens and vendor-prefixed keys, which travel in a header rather
+# than a URL. httpx does not log headers, but an exception, a traceback or a
+# well-meant debug line can still carry one, and a key in the log file is a
+# key on the dashboard's screen.
+_BEARER = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+_VENDOR_KEY = re.compile(r"\b(wasi|sk|pk|key)_[A-Za-z0-9]{12,}\b", re.IGNORECASE)
+
 MASK = "***"
 
 
 def redact(text: str) -> str:
-    """Mask the values of secret-looking query parameters in text."""
-    return _SECRET_PARAM.sub(lambda m: m.group(1) + MASK, text)
+    """Mask secret-looking query parameters, bearer tokens and API keys."""
+    text = _SECRET_PARAM.sub(lambda m: m.group(1) + MASK, text)
+    text = _BEARER.sub(lambda m: m.group(1) + MASK, text)
+    return _VENDOR_KEY.sub(lambda m: m.group(1) + "_" + MASK, text)
 
 
 def quiet_http_loggers() -> None:

@@ -24,6 +24,10 @@ class Prospect(BaseModel):
     # verified / risky (catch-all) / guess (never auto-sent) / invalid / ""
     email_status: str = ""
     phone: str = ""
+    # The phone in E.164, normalised on write (state.add_prospect). `phone`
+    # keeps whatever the listing published, for a human to read; this is what
+    # WhatsApp is addressed with and what an inbound message is matched on.
+    phone_e164: str = ""
     phone_verified: bool = False
     linkedin_url: str = ""
     title: str = ""            # required for a valid contact

@@ -190,7 +190,8 @@ async def test_sender_holds_an_email_with_a_dash_for_review(tmp_path):
     finally:
         mod.sync_sending_mode = mod_sync
     assert status == "pending_review"
-    assert error.startswith(HELD_FOR_REVIEW + "the email uses a dash")
+    # "the message", not "the email": the Sender holds WhatsApp too now.
+    assert error.startswith(HELD_FOR_REVIEW + "the message uses a dash")
 
 
 # ── The writer reads only the signal guidance that fits ──────────────────

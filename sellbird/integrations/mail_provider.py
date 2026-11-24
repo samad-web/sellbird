@@ -221,6 +221,23 @@ class MailProvider(ABC):
         """Cheap end-to-end credential check. Returns (ok, detail)."""
 
 
+def get_whatsapp_provider(config, env):
+    """The WhatsApp provider, or None when the channel is off or unconfigured.
+
+    Separate from get_mail_provider on purpose: channels.email.provider and
+    channels.whatsapp.provider are different settings, and a misconfigured
+    WhatsApp channel must never silently fall back to sending email.
+    """
+    whatsapp = getattr(getattr(config, "channels", None), "whatsapp", None)
+    if whatsapp is None or not getattr(whatsapp, "enabled", False):
+        return None
+    if (getattr(whatsapp, "provider", "") or "").strip().lower() != "wasi":
+        return None
+    from sellbird.integrations.wasi import WasiProvider
+    provider = WasiProvider(config, env)
+    return provider if provider.is_configured() else None
+
+
 def get_mail_provider(config, env) -> MailProvider | None:
     """Build the configured native provider, or None for instantly/unknown."""
     provider = (config.channels.email.provider or "").strip().lower()

@@ -20,7 +20,7 @@ import aiosqlite
 
 from sellbird.models.company import Company
 from sellbird.models.prospect import Prospect
-from sellbird.phone import is_e164
+from sellbird.phone import is_e164, looks_like_phone
 from sellbird.phone import normalize as normalize_phone
 from sellbird.models.campaign import Campaign, EmailStep  # noqa: F401 (EmailStep re-exported)
 from sellbird.models.conversation import Conversation, Message  # noqa: F401
@@ -1568,13 +1568,19 @@ class StateManager:
 
     # ── Suppressions: addresses and domains never emailed ──
 
-    SUPPRESSION_KINDS = ("address", "domain")
+    # "phone" is a WhatsApp recipient, stored in E.164. It is its own kind
+    # because the domain-parent expansion an address goes through is
+    # meaningless for a number, and must never be applied to one.
+    SUPPRESSION_KINDS = ("address", "domain", "phone")
     SUPPRESSION_REASONS = ("opted_out", "bounced", "complaint", "manual", "imported")
 
     @staticmethod
     def suppression_key(kind: str, value: str) -> str:
-        """The stored value: a lower-cased address, or a bare lower-cased domain."""
+        """The stored value: a lower-cased address, a bare lower-cased domain,
+        or a phone number in E.164."""
         value = _norm(value)
+        if kind == "phone":
+            return normalize_phone(value)
         if kind == "domain":
             # "https://www.Example.org/contact", "pat@example.org" and "example.org." all mean example.org.
             value = value.split("@")[-1]
@@ -1595,7 +1601,7 @@ class StateManager:
             reason = "manual"
         key = self.suppression_key(kind, value)
         if not key or (kind == "address" and "@" not in key):
-            raise ValueError("not an address or domain")  # also a domain that normalises to nothing
+            raise ValueError("not an address, domain or phone number")
         async with self._connect() as db:
             cursor = await db.execute(
                 "INSERT OR IGNORE INTO suppressions (id, kind, value, reason, source) VALUES (?, ?, ?, ?, ?)",
@@ -1635,8 +1641,27 @@ class StateManager:
         return out
 
     async def is_suppressed(self, email: str) -> str | None:
-        """The reason an address won't be emailed (itself or its domain), or None."""
-        return (await self.suppressed_among([email])).get(_norm(email))
+        """The reason this recipient won't be contacted, or None.
+
+        Takes an address (checked itself and by its domain) or a phone number
+        in E.164 (checked exactly). A number never goes through the domain
+        expansion: splitting "+442079460018" on "." and treating the pieces as
+        domains would be nonsense, and a suppression that matches nothing is
+        worse than none.
+        """
+        recipient = _norm(email)
+        if recipient and "@" not in recipient and looks_like_phone(recipient):
+            number = normalize_phone(recipient)
+            if not number:
+                return None
+            async with self._connect() as db:
+                async with db.execute(
+                    "SELECT reason FROM suppressions WHERE kind = 'phone' AND value = ?",
+                    (number,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+            return row[0] if row else None
+        return (await self.suppressed_among([email])).get(recipient)
 
     async def list_suppressions(self, limit: int = 200, offset: int = 0) -> list[dict]:
         async with self._connect() as db:

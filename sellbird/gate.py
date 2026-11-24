@@ -382,6 +382,22 @@ def template_mismatch(rendered: str, template_body: str) -> str:
     return "the message is not this approved template with its placeholders filled"
 
 
+def render_template(template_body: str, params: dict | None) -> str:
+    """The approved template with its placeholders filled from ``params``.
+
+    A placeholder with no value is left as it is, so it trips
+    template_mismatch and pre_send_check instead of going out as a gap.
+    """
+    values = params or {}
+
+    def _fill(match):
+        name = match.group(0).strip("{} ").strip()
+        value = values.get(name)
+        return match.group(0) if value in (None, "") else str(value)
+
+    return _PLACEHOLDER_RE.sub(_fill, template_body or "")
+
+
 def template_placeholders(template_body: str) -> list[str]:
     """The placeholder names an approved template expects, in order."""
     return [m.group(0).strip("{} ").strip()

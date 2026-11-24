@@ -418,6 +418,12 @@ class WhatsAppChannelConfig(BaseModel):
     # Sellbird's copy of the approved templates (`sellbird whatsapp templates`
     # writes it). A send is checked against the entry named here.
     templates: list[WhatsAppTemplate] = []
+    # How each template placeholder is filled, as {placeholder: expression}.
+    # The expression uses the same merge variables as an email body, e.g.
+    #   template_params: {customer_name: "{{first_name}}", practice_name: "{{company}}"}
+    # Meta's approved placeholder names are the user's own ("customer_name"),
+    # so there is no guessing a mapping onto Sellbird's merge fields.
+    template_params: dict[str, str] = {}
     # Dialling prefix for numbers written the way they'd be dialled locally,
     # e.g. "+91". A prefix, not an ISO code: see sellbird/phone.py.
     default_country_code: str = ""
@@ -467,6 +473,18 @@ class WhatsAppChannelConfig(BaseModel):
     @classmethod
     def _blank_templates(cls, v):
         return [] if v is None else v
+
+    @field_validator("template_params", mode="before")
+    @classmethod
+    def _blank_params(cls, v):
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            raise ValueError(
+                "channels.whatsapp.template_params must be a mapping of placeholder "
+                'name to expression, e.g. {customer_name: "{{first_name}}"}'
+            )
+        return {str(k).strip(): "" if val is None else str(val) for k, val in v.items()}
 
     @model_validator(mode="after")
     def _cold_needs_a_template(self):
@@ -996,6 +1014,10 @@ class EnvConfig(BaseModel):
     m365_tenant_id: str = ""
     # Optional: only used when compliance.precleared.enabled is true.
     precleared_api_key: str = ""
+    # WhatsApp through Wasi (channels.whatsapp.enabled). The key never goes
+    # in a config file or the database: it is an .env value only.
+    wasi_api_key: str = ""
+    wasi_api_base_url: str = ""
 
 
 def _format_validation_error(e: ValidationError) -> str:
@@ -1139,6 +1161,8 @@ def load_env() -> EnvConfig:
         m365_client_id=os.getenv("M365_CLIENT_ID", "").strip(),
         m365_tenant_id=os.getenv("M365_TENANT_ID", "").strip(),
         precleared_api_key=os.getenv("PRECLEARED_API_KEY", "").strip(),
+        wasi_api_key=os.getenv("WASI_API_KEY", "").strip(),
+        wasi_api_base_url=os.getenv("WASI_API_BASE_URL", "").strip(),
     )
     return env
 
