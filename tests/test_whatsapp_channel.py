@@ -333,3 +333,55 @@ def test_the_docs_exist_and_say_the_dangerous_part():
     assert "off by default" in doc
     assert "Marketing" in doc           # the category a cold opener needs
     assert "24 hours" in doc            # the window
+
+
+# ── the upgrade path: every other test starts from an empty database ──
+
+@pytest.mark.asyncio
+async def test_an_existing_install_upgrades_to_the_channel_column(tmp_path):
+    """v16 -> v17 on a database that already has rows in it.
+
+    Worth its own test: every other test here creates the schema from
+    scratch, so the ALTER TABLE path — the one every existing user takes on
+    their next run — would otherwise never execute.
+    """
+    import sqlite3
+
+    from sellbird.state import MIGRATIONS
+
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    try:
+        for version, script in enumerate(MIGRATIONS[:16], start=1):
+            con.executescript(script)
+            con.execute(f"PRAGMA user_version = {version}")
+        con.execute(
+            "INSERT INTO prospects (id, first_name, email, phone, status) "
+            "VALUES ('p1', 'Dana', 'dana@example.com', '+1 555 0100 123', 'new')")
+        con.execute(
+            "INSERT INTO outbox (id, prospect_id, to_email, subject, body, status) "
+            "VALUES ('o1', 'p1', 'dana@example.com', 's', 'b', 'sent')")
+        con.commit()
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 16
+    finally:
+        con.close()
+
+    store = StateManager(str(path))
+    await store.init_db()
+
+    con = sqlite3.connect(path)
+    try:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+    finally:
+        con.close()
+
+    # Mail queued before the upgrade is email, so nothing changes for it.
+    assert (await store.get_outbox_item("o1"))["channel"] == "email"
+    # An existing phone isn't normalised until asked, then it is findable.
+    assert (await store.get_prospect("p1")).phone_e164 == ""
+    assert await store.backfill_phone_e164() == 1
+    found = await store.get_prospect_by_phone("+15550100123")
+    assert found is not None and found.id == "p1"
+    # Running it again changes nothing.
+    await store.init_db()
+    assert (await store.get_outbox_item("o1"))["channel"] == "email"
