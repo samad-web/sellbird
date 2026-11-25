@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="same-origin">
+<title>Sign in — Sellbird</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="/static/sellbird-mark.svg" type="image/svg+xml">
+<style>
+  .signin-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  .signin { width: 100%; max-width: 380px; }
+  .signin h1 { font-size: 20px; margin: 0 0 4px; }
+  .signin .form-group { margin-bottom: 14px; }
+  .signin button { width: 100%; }
+  .signin .note { margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="signin-wrap">
+  <div class="card signin">
+    <h1>Sellbird</h1>
+    <p class="muted" id="intro">Sign in to continue.</p>
+
+    <!-- A real form, so password managers offer to fill and save it. The
+         submit handler posts JSON: the API takes nothing else, which is one
+         of the things that stops another site's form reaching it. -->
+    <form id="signin-form" autocomplete="on">
+      <div class="form-group">
+        <label class="form-label" for="username">Username</label>
+        <input class="form-input" id="username" name="username" autocomplete="username"
+               autocapitalize="none" autocorrect="off" spellcheck="false" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="password">Password</label>
+        <input class="form-input" id="password" name="password" type="password"
+               autocomplete="current-password" required>
+      </div>
+      <button class="btn btn-primary" type="submit" id="go">Sign in</button>
+    </form>
+
+    <p class="muted note" id="message" role="status" aria-live="polite"></p>
+  </div>
+</div>
+
+<script>
+// Posts JSON and lets the browser keep the session cookie. Nothing is stored
+// here: no token in sessionStorage, no password kept after the request.
+(function () {
+  var form = document.getElementById('signin-form');
+  var message = document.getElementById('message');
+  var go = document.getElementById('go');
+
+  function say(text, bad) {
+    message.textContent = text || '';
+    message.className = 'note ' + (bad ? 'email-tag invalid' : 'muted');
+  }
+
+  form.addEventListener('submit', async function (event) {
+    event.preventDefault();
+    var username = document.getElementById('username').value.trim();
+    var password = document.getElementById('password').value;
+    if (!username || !password) { say('Both fields are needed.', true); return; }
+
+    go.disabled = true;
+    say('Checking…');
+    try {
+      var response = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({username: username, password: password})
+      });
+      var data = await response.json().catch(function () { return {}; });
+      if (response.ok && data.ok) {
+        document.getElementById('password').value = '';
+        window.location.replace('/');
+        return;
+      }
+      say(data.message || 'That didn’t work.', true);
+    } catch (e) {
+      say('Couldn’t reach the server.', true);
+    }
+    go.disabled = false;
+  });
+})();
+</script>
+</body>
+</html>

@@ -1273,6 +1273,93 @@ def _say_which_workspace(root: str) -> None:
     print(f"  [workspace: {name or root}]", file=sys.stderr)
 
 
+def cmd_server(args):
+    """The operator account for a hosted Sellbird (sellbird serve)."""
+    import getpass
+
+    from sellbird.paths import PROJECT_ROOT
+    from sellbird.server_auth import MIN_PASSWORD_CHARS, AccountError, read_account, write_account
+    from sellbird.state import StateManager
+
+    data_dir = PROJECT_ROOT / "data"
+
+    if args.server_action == "show":
+        account = read_account(data_dir)
+        if account is None:
+            print(f"{NEWLINE}  No operator account. Create one with: "
+                  f"sellbird server set-password{NEWLINE}")
+            raise SystemExit(1)
+        print(f"{NEWLINE}  Operator: {account['username']}")
+        print(f"  Created:  {account.get('created_at', '?')[:19]}")
+        print(f"  Stored:   {data_dir / 'operator.json'} (hashed with scrypt){NEWLINE}")
+        return
+
+    # set-password. Never an argument: arguments land in shell history, in ps,
+    # and in any process listing on the machine.
+    existing = read_account(data_dir)
+    default_name = existing["username"] if existing else ""
+    prompt = f"  Username [{default_name}]: " if default_name else "  Username: "
+    username = (input(prompt).strip() or default_name)
+    if not username:
+        print(f"{NEWLINE}  A username is needed.{NEWLINE}")
+        raise SystemExit(2)
+    print(f"{NEWLINE}  This password is the only thing between the internet and your")
+    print("  mailbox, your prospects and your keys. Use a long one from a password")
+    print(f"  manager, at least {MIN_PASSWORD_CHARS} characters. It is not echoed.{NEWLINE}")
+    password = getpass.getpass("  Password: ")
+    again = getpass.getpass("  Again: ")
+    if password != again:
+        print(f"{NEWLINE}  Those didn't match. Nothing was changed.{NEWLINE}")
+        raise SystemExit(2)
+    try:
+        path = write_account(data_dir, username, password)
+    except AccountError as e:
+        print(f"{NEWLINE}  {e}{NEWLINE}")
+        raise SystemExit(2)
+
+    async def _end_sessions():
+        state = StateManager()
+        await state.init_db()
+        return await state.delete_sessions_for(username)
+
+    ended = asyncio.run(_end_sessions())
+    print(f"{NEWLINE}  Saved to {path} (owner-only, hashed with scrypt).")
+    if ended:
+        print(f"  Signed out {ended} existing session(s): a changed password ends them.")
+    print(f"  Start the server with: sellbird serve --url https://your.host{NEWLINE}")
+
+
+def cmd_serve(args):
+    """Run Sellbird for a name on the internet, behind the sign-in."""
+    import uvicorn
+
+    from sellbird.paths import PROJECT_ROOT
+    from sellbird.server import build_server_app
+    from sellbird.server_auth import AccountError
+    from sellbird.state import StateManager
+
+    if not 1 <= args.port <= 65535:
+        print(f"  Invalid port: {args.port}. Must be 1-65535.")
+        sys.exit(2)
+
+    data_dir = PROJECT_ROOT / "data"
+    state = StateManager()
+    asyncio.run(state.init_db())
+    try:
+        app = build_server_app(public_url=args.url, state=state, data_dir=data_dir)
+    except AccountError as e:
+        print(f"{NEWLINE}  Not started: {e}{NEWLINE}")
+        sys.exit(2)
+
+    # Loopback only, as the local dashboard is. The TLS proxy on this machine
+    # is what faces the internet; Sellbird never binds a public interface, so
+    # a misconfigured firewall can't expose it directly.
+    print(f"{NEWLINE}  Sellbird is serving {args.url}")
+    print(f"  Listening on 127.0.0.1:{args.port} - put your HTTPS proxy in front of it.")
+    print(f"  Sign in at {args.url.rstrip('/')}/login{NEWLINE}")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+
+
 def cmd_workspace(args):
     """Several projects from one install, each with its own everything."""
     from sellbird import workspaces
@@ -1410,6 +1497,22 @@ def main():
     sub.add_argument("--force", action="store_true",
                      help="With add: point an existing name somewhere else")
     sub.set_defaults(func=cmd_workspace)
+
+    # sellbird serve / sellbird server
+    sub = subparsers.add_parser(
+        "serve", help="Run Sellbird for a public URL, behind a username and password")
+    sub.add_argument("--url", required=True, metavar="https://host",
+                     help="The public URL this server answers to. Must be https.")
+    sub.add_argument("--port", type=int, default=5555,
+                     help="Loopback port for your HTTPS proxy (default: 5555)")
+    sub.set_defaults(func=cmd_serve)
+
+    sub = subparsers.add_parser(
+        "server", help="The operator account a hosted Sellbird signs in with")
+    sub.add_argument("server_action", nargs="?", default="show",
+                     choices=["set-password", "show"],
+                     help="set-password: create or change it; show: who it is")
+    sub.set_defaults(func=cmd_server)
 
     # sellbird status
     sub = subparsers.add_parser("status", help="Show pipeline status")

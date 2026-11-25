@@ -318,10 +318,17 @@ async function lockIfRefused(r) {
     if (r.ok && _locked) hideLock();
     return false;
   }
-  let why = '';
-  if (r.status === 503) {
-    try { why = ((await r.json()) || {}).message || ''; } catch { /* ignore */ }
+  let why = '', code = '';
+  try { const b = (await r.clone().json()) || {}; why = b.message || ''; code = b.error || ''; }
+  catch { /* ignore */ }
+  // A hosted Sellbird (sellbird serve) answers 'signin_required' instead of
+  // the local guard's 'unauthorized': the session has run out, so the right
+  // answer is the sign-in form, not the token lock screen.
+  if (r.status === 401 && code === 'signin_required') {
+    window.location.replace('/login');
+    return true;
   }
+  if (r.status !== 503) why = '';
   showLock(r.status === 503
     ? 'The dashboard server can\'t use its token file, so it is refusing every request. ' + why
     : authToken()

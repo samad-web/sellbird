@@ -26,14 +26,19 @@ _SECRET_PARAM = re.compile(
 # key on the dashboard's screen.
 _BEARER = re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
 _VENDOR_KEY = re.compile(r"\b(wasi|sk|pk|key)_[A-Za-z0-9]{12,}\b", re.IGNORECASE)
+# A hosted Sellbird's session cookie: whoever has it is signed in, so it is
+# exactly as sensitive as the token above and reaches logs the same ways.
+_SESSION_COOKIE = re.compile(r"(sellbird_session=)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
 
 MASK = "***"
 
 
 def redact(text: str) -> str:
-    """Mask secret-looking query parameters, bearer tokens and API keys."""
+    """Mask secret-looking query parameters, bearer tokens, API keys and the
+    hosted sign-in cookie."""
     text = _SECRET_PARAM.sub(lambda m: m.group(1) + MASK, text)
     text = _BEARER.sub(lambda m: m.group(1) + MASK, text)
+    text = _SESSION_COOKIE.sub(lambda m: m.group(1) + MASK, text)
     return _VENDOR_KEY.sub(lambda m: m.group(1) + "_" + MASK, text)
 
 

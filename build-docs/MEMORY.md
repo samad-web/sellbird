@@ -91,3 +91,40 @@ Two traps worth remembering:
   nothing from `sellbird` at module level — keep it that way.
 - A test that calls `workspaces.remove(name)` without `path=` edits the user's
   real registry. Always pass a tmp path.
+
+### 2026-11-25 — Email provider: Microsoft 365 over Graph, not Resend
+The operator asked for Resend, already verified on their sending domain. Three
+findings, in the order they mattered:
+
+1. **Resend's Acceptable Use Policy names cold outreach as prohibited
+   spamming**, alongside purchased lists and scraped data; mail must go to
+   recipients who explicitly opted in. Sellbird is a cold outreach tool, so
+   the first campaign would breach it. Stated remedy: account paused or
+   terminated, no refunds.
+2. **Resend has no IMAP.** Its inbound is webhook-based, and Sellbird runs
+   locally behind NAT — the same wall the WhatsApp channel hit. Sending would
+   work; reading replies would not.
+3. **The reply mailbox is Microsoft 365** (root MX is Outlook), and Microsoft
+   has turned off password sign-in for IMAP in Exchange Online. So even
+   "Resend for sending, IMAP for replies" could not read that mailbox.
+
+Decision: `channels.email.provider: microsoft` (Graph, OAuth). Resend stays
+for whatever transactional mail it already does; Sellbird does not use it.
+
+**Their Resend DNS is correct**, for the record, in case it is ever revisited:
+DKIM at `resend._domainkey` on the root (so it aligns with a root From), SPF
+and the bounce MX on the `send.` subdomain, so the root's `-all` doesn't break
+it — SPF is checked against the envelope sender.
+
+**Against advice, cold email goes out from the operator's main company
+domain**, not a dedicated secondary one. They were told the risk (a complaint
+spiral takes their real correspondence down with it) and chose it anyway.
+Don't silently change it; do keep volume low and watch the bounce rate.
+
+**No Reply-To support exists** in the codebase (`persona` has no `reply_to`,
+and nothing sets the header). It was scoped as a small change if Resend-plus-
+another-mailbox is ever wanted, and was not built.
+
+### 2026-11-25 — What Sellbird sells here: Auratel
+Auratel is the product, not the operator's agency. Train on Auratel's own site
+so the emails pitch it. The agency domain is only the sending identity.

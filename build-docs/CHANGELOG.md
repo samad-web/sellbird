@@ -74,3 +74,34 @@ new isolation.
 **Known limit:** two projects draw on the same Claude subscription, so
 `usage.max_daily_claude_percent` is a share of one quota in each config. Two
 projects at 80% will exhaust it. Documented, not enforced.
+
+## Hosted sign-in (2026-11-25)
+
+**Built** — `sellbird serve`: the dashboard at a public URL behind a username
+and password, for an operator who asked for that over an SSH tunnel or an
+identity proxy, having been told it is the most work and the most risk.
+
+- `sellbird/server_auth.py`: scrypt account (standard library), server-side
+  sessions stored hashed, per-account and per-address lockout, and an ASGI
+  guard that keeps the provenance, public-path and JSON-body rules of the
+  local one while replacing its loopback Host check and bearer token.
+- `sellbird/server.py`: `/login`, `/api/login`, `/api/logout`, and the app
+  built through the existing `dashboard.build_app(guard=...)` seam.
+- `sellbird/web/login.html`; `app.js` now sends a hosted 401 to the sign-in
+  page instead of the token lock screen.
+- Migration v19: a `sessions` table.
+- `sellbird server set-password` / `show`; `docs/hosting.md`.
+- `logsafety.py` redacts the session cookie.
+
+**`dashboard_auth.py` and `dashboard.py` were not edited.** A local install
+behaves exactly as before, and two tests assert it.
+
+**New risk this introduces, named so it is not forgotten:** a cookie is sent
+by the browser automatically where a bearer token was not, so CSRF is a real
+risk here that the local dashboard never had. Three independent defences,
+because one is not enough: `SameSite=Strict`, the inherited `Origin` /
+`Sec-Fetch-Site` checks, and the JSON-only rule for mutations.
+
+**Deliberately not built:** two-factor (recommended as the next step: a
+stolen password is currently enough), more than one user, password reset by
+email.

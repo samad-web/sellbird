@@ -605,6 +605,23 @@ MIGRATIONS: list[str] = [
       WHERE channel = 'whatsapp' AND kind = 'sequence'
         AND status IN ('pending_review', 'approved', 'sending');
     """,
+    # -- v19: sign-in sessions for a hosted Sellbird (sellbird/server_auth.py) --
+    # Only `sellbird serve` uses this. A local `sellbird dashboard` keeps its
+    # token and never writes a row here.
+    # id_hash, not the id: a stolen copy of this database is then a list of
+    # expired-looking rows rather than a set of live sessions. Both times are
+    # absolute, so a session can't be extended by moving the clock backwards.
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id_hash TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        last_seen_at TIMESTAMP NOT NULL,
+        ip TEXT DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -1841,6 +1858,62 @@ class StateManager:
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         return None
+
+    # -- Sign-in sessions (hosted only; see sellbird/server_auth.py) --
+
+    async def create_session(self, id_hash: str, username: str, expires_at: str,
+                             ip: str = "") -> None:
+        """Record one signed-in session. The caller hashes the id."""
+        async with self._connect() as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO sessions "
+                "(id_hash, username, created_at, expires_at, last_seen_at, ip) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (id_hash, username, _utcnow().isoformat(), expires_at,
+                 _utcnow().isoformat(), ip or ""),
+            )
+            await db.commit()
+
+    async def read_session(self, id_hash: str, idle_cutoff: str) -> dict | None:
+        """A live session, or None. Expired or idle rows are deleted on the
+        way past, so the table cleans itself without a scheduled job."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM sessions WHERE id_hash = ?", (id_hash,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            now = _utcnow().isoformat()
+            if row is None:
+                return None
+            if row["expires_at"] <= now or row["last_seen_at"] <= idle_cutoff:
+                await db.execute("DELETE FROM sessions WHERE id_hash = ?", (id_hash,))
+                await db.commit()
+                return None
+            await db.execute("UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?",
+                             (now, id_hash))
+            await db.commit()
+            return dict(row)
+
+    async def delete_session(self, id_hash: str) -> None:
+        async with self._connect() as db:
+            await db.execute("DELETE FROM sessions WHERE id_hash = ?", (id_hash,))
+            await db.commit()
+
+    async def delete_sessions_for(self, username: str) -> int:
+        """Sign out everywhere: every session this person has. Used on a
+        password change, so a changed password really ends the old ones."""
+        async with self._connect() as db:
+            cursor = await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
+            await db.commit()
+            return cursor.rowcount or 0
+
+    async def purge_expired_sessions(self) -> int:
+        async with self._connect() as db:
+            cursor = await db.execute("DELETE FROM sessions WHERE expires_at <= ?",
+                                      (_utcnow().isoformat(),))
+            await db.commit()
+            return cursor.rowcount or 0
 
     async def get_previous_step(self, item: dict) -> dict | None:
         """The email a sequence follow-up follows (same campaign and person,

@@ -204,3 +204,45 @@ key, one asserts the authenticated route carries the name.
 
 **Regression run:** 1 failed, 3752 passed before the fix; 37 workspace tests and
 307 dashboard/MCP tests pass after it. Full suite re-run below.
+
+## Hosted sign-in (2026-11-25)
+
+`tests/test_server_auth.py` (31), one or more per acceptance criterion in
+`build-docs/features/hosted-login.md`.
+
+| Criterion | Test |
+|---|---|
+| 1 no session reaches no data | `test_no_session_reaches_no_data` |
+| 2 a session gets through | `test_a_signed_in_session_gets_through` |
+| 3 wrong password == unknown user | `test_a_wrong_password_and_an_unknown_user_answer_identically` |
+| 4 lockout, per account and per address | `test_failures_lock_the_account_and_the_address`, `test_the_lockout_is_counted_per_key_not_globally` |
+| 5 a new session id on login | `test_logging_in_replaces_the_session` |
+| 6 logout revokes server-side | `test_logging_out_revokes_immediately` |
+| 7 an expired session is refused and deleted | `test_an_expired_session_is_refused_and_deleted` |
+| 8 the id is never stored in the clear | `test_the_session_id_is_never_stored_in_the_clear` |
+| 9 cross-origin POST refused (CSRF) | `test_a_cross_origin_post_with_a_valid_cookie_is_refused` |
+| 10 a foreign Host refused first | `test_a_foreign_host_is_refused_before_anything_else` |
+| 11 refuses to start wrong | `test_a_non_https_url_is_refused`, `test_no_account_means_no_server` |
+| 12 the password is not stored or logged | `test_the_password_is_not_stored_and_the_file_is_private`, `test_a_session_cookie_never_survives_a_log_line` |
+| 13 the local dashboard is unchanged | `test_the_local_dashboard_still_uses_its_token`, `test_the_local_guard_still_refuses_a_public_host` |
+
+**Mutation-tested, because 31 tests passing first time on security code is not
+evidence of anything.** Three load-bearing lines were broken on purpose and
+the suite re-run:
+
+| Mutation | Result |
+|---|---|
+| `if session is None:` → `if False:` (session not required) | 5 tests fail |
+| the `Origin` check removed (no CSRF defence) | `test_a_cross_origin_post_...` fails |
+| any `Host` accepted | `test_a_foreign_host_...` fails |
+
+Restored, 31 pass again. A test that passes against broken code is worse than
+no test, and this is the file where that matters most.
+
+**Regression run:** 3785 passed, 192 skipped. That run began before the
+`logsafety.py` change, so the suites covering it were re-run separately: 314
+passed, 10 skipped.
+
+**Not covered by tests, and worth knowing:** the lockout counters are in
+memory, so restarting the process forgives them. Right trade for one
+operator, but it means someone who can crash the process gets fresh attempts.
