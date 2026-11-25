@@ -58,8 +58,12 @@ decisions rather than patches:
   because their terms forbid scraping, while the repo ships a 433-line
   Playwright scraper. The claim was corrected rather than the module deleted,
   so LinkedIn prospecting still exists: off by default, against LinkedIn's
-  terms, and Claude is told never to enable it for the user. Deleting the
-  module is still the cleaner option if it is never used.
+  terms, and Claude is told never to enable it for the user.
+
+### 2026-11-25 - The LinkedIn module stays
+The user decided to keep `sellbird/integrations/linkedin.py` rather than delete
+it. Don't propose deleting it again. The guardrails stand: off by default, and
+Claude never enables it for them.
 - **15** `--max-spend` now predicts the next query's cost as the worse of its
   estimate and what queries in this run have actually cost. The old check
   looked only at money already spent, so a provider that billed more than it
