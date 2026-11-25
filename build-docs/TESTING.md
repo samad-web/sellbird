@@ -246,3 +246,12 @@ passed, 10 skipped.
 **Not covered by tests, and worth knowing:** the lockout counters are in
 memory, so restarting the process forgives them. Right trade for one
 operator, but it means someone who can crash the process gets fresh attempts.
+
+## Fix: offer preview and operator email rules (2026-11-25)
+
+Three tests in `tests/test_offer.py`: the preview writes with the operator's
+rules; without rules it uses the built-in shape; an unreadable rules file is
+reported rather than silently replaced. The first was confirmed to fail with
+the old line put back. On the way, my new helper reused the name of an
+existing `_config()` in the same file and broke two old tests — caught on the
+first run, renamed. Full suite: 3789 passed, 192 skipped.

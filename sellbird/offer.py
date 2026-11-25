@@ -19,6 +19,7 @@ from pathlib import Path
 
 import yaml
 
+from sellbird.config import EmailRulesError, load_email_rules
 from sellbird.textio import read_user_text
 from sellbird.untrusted import UNTRUSTED_RULE, fence
 
@@ -132,7 +133,13 @@ async def preview_email(brain, state, config, entry: str) -> dict:
     trial.product.offer.entry = entry
     writer = Writer(brain, state, trial, None)
     writer.skills = brain.load_skills_for_agent("writer")
-    writer.email_rules = ""
+    # The preview must be the email that would actually go out. With
+    # writer.email_rules set, the operator's rules replace the built-in shape,
+    # so previewing without them showed a shape that is never sent.
+    try:
+        writer.email_rules = load_email_rules(trial)
+    except EmailRulesError as e:
+        return {"ok": False, "message": f"Your email rules can't be used: {e}"}
     draft = await writer._write_personal_email(prospect)
     draft = await writer._keep_to_rules(draft, step=1, names=_names(prospect)) if draft else None
     if not draft:

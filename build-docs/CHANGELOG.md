@@ -105,3 +105,12 @@ because one is not enough: `SameSite=Strict`, the inherited `Origin` /
 **Deliberately not built:** two-factor (recommended as the next step: a
 stolen password is currently enough), more than one user, password reset by
 email.
+
+## Fix: the offer preview ignored the operator's email rules (2026-11-25)
+
+`offer.preview_email` set `writer.email_rules = ""` on purpose, so with
+`writer.email_rules` configured the dashboard previewed Sellbird's built-in
+shape — an email that is never actually sent once the operator's rules
+replace it. Found while previewing an operator's real rules. It now loads
+them, and says so plainly when the file can't be read instead of quietly
+previewing the wrong shape. Nothing tested `preview_email` before.
