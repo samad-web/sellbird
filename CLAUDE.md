@@ -62,7 +62,15 @@ People will ask "how does this work?" — explain it simply:
   WhatsApp Business Account get banned. Recommend it for people who already replied
   to an email and gave a number. Everything else is shared with email — the Outbox
   approval ladder, the pre-send gate, suppressions, and stop-on-reply, which cancels
-  queued messages on *both* channels. Never turn `cold_first_touch` on yourself
+  queued messages on *both* channels. A cold sequence works like email's:
+  `channels.whatsapp.follow_ups` adds steps after the opener, each needing its own
+  approved **Marketing** template (someone who never replied is still outside Meta's
+  24-hour window), step 2 never goes before step 1 has, and nothing is staged unless
+  every step can be. The placeholders named in `channels.whatsapp.ai_params` are
+  written per prospect by Claude from the same facts a first email uses, checked
+  against Meta's parameter rules, and fall back to `template_params` if the model is
+  unavailable or its answer breaks them. Dashboard → Settings → WhatsApp shows the
+  number's live standing and the sequence. Never turn `cold_first_touch` on yourself
   without the user asking for it in so many words.
 
 - **"What's the dashboard?"** → Have the user run `sellbird dashboard` in their own terminal and open the private link it prints (`http://127.0.0.1:5555/#token=…`; `sellbird dashboard --url` prints it again). Don't read, print or repeat the token yourself: it unlocks the dashboard. It opens on **Today** — anything waiting on a decision, then the pipeline. Tabs for Signals, Companies, Contacts, Campaigns, Outbox, Conversations, Activity, Usage, Settings.

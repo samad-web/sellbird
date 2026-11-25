@@ -276,3 +276,94 @@ Wasi.
   attempt rather than a clean `validation_failed`.
 - `POST /messages` requires `client_id` in the body although the API key already
   identifies the client — easy to get wrong, and it is not obvious it must match the key.
+
+---
+
+# Phase 2 — parity with email, and intelligence
+
+## What Phase 1 left out (read off the code, 2026-11-25)
+
+| Email has | WhatsApp had |
+|---|---|
+| A 3-step sequence with delays, written per batch | **one** opener, nothing after it |
+| The first email personalised per prospect by Claude | template params from static config expressions (`"{company}"`) |
+| `_follow_up_order`: step 2 can never precede step 1 | not called (there was no step 2) |
+| A double-send guard (`uq_outbox_campaign_step`) | **none** — the index only covers `campaign_id != ''`, and WhatsApp rows have none, so `sellbird whatsapp queue` twice queued two openers |
+| Replies read, classified, drafted by Claude, queued for approval | **already shared** — `_process_reply` / `_queue_native_reply` are channel-aware |
+| A dashboard surface | a `channel` badge on Outbox and conversation rows, nothing else |
+
+So reply handling was already at parity. Outbound was not, and the missing
+double-send guard was a real bug.
+
+## What Meta allows, which decides the design
+
+- A template body is **fixed text approved in advance**. The only per-prospect
+  freedom is the **parameter values**. So "intelligent" on WhatsApp means
+  Claude writes the parameters, not the message.
+- A follow-up to someone who never replied is still outside the 24-hour
+  window, so **each follow-up needs its own approved Marketing template**.
+- Parameters may not contain a newline, a tab, or more than four consecutive
+  spaces — Meta rejects the send, and a rejected template costs the number's
+  standing.
+
+## Architecture
+
+- **`channels.whatsapp.follow_ups`**: `[{template, delay_days}]`. Staged with
+  the opener as steps 2..n, each at a cumulative delay, each checked for
+  Marketing category and template match at send time like the opener.
+- **`channels.whatsapp.ai_params`**: the placeholder names Claude fills per
+  prospect. Everything else keeps coming from `template_params` expressions,
+  which are also the fallback when the brain is unavailable or its value
+  breaks Meta's rules.
+- **`outbox.params_json`**: the parameter values as approved. Without this the
+  drain would re-render from config and Claude's per-prospect values would be
+  lost — and the existing "the template or its parameters changed after this
+  was approved" check would fire on every AI-written row.
+- **`template_param_problem()`** in `gate.py`: Meta's parameter rules as a
+  pure function, so a model's answer is checked, not trusted.
+- **`uq_outbox_whatsapp_step`**: the double-send guard WhatsApp rows never had.
+- **`GET /api/whatsapp`** + a WhatsApp card in dashboard Settings: the number's
+  live standing, Meta's remaining allowance, the templates with their
+  categories, and which one is the opener. Read-only, so the coding agent may
+  call it.
+
+## Impact map
+
+| Touched | What could break |
+|---|---|
+| `state.py` migration v18 | a column + an index; the index can fail on an install that already has duplicate WhatsApp rows — created with `IF NOT EXISTS` and no backfill, so a dup install keeps working, the guard just doesn't apply |
+| `add_outbox_item` | one new keyword, defaulted; every existing caller unchanged |
+| `_whatsapp_payload` | must prefer the stored params and fall back to expressions, or Phase 1 rows already in someone's outbox stop sending |
+| `_drain_whatsapp` | now calls `_follow_up_order`, which reschedules rows; a bug here delays or reorders messages |
+| `writer.py` | a new method, called only by the Sender's WhatsApp staging; email is untouched |
+| dashboard + `agent_policy` | a new read-only route |
+
+## Edge cases
+
+- Brain unavailable or its answer breaks Meta's rules → the config expression
+  is used; if that leaves a placeholder empty, nothing is staged and the CLI
+  says which placeholder.
+- `follow_ups` naming a template that isn't in `templates` → staging refuses
+  with the name, before anything is queued.
+- A follow-up whose opener was never sent → `_follow_up_order` cancels it with
+  "step 1 wasn't sent", exactly as email does.
+- They reply after step 1 → stop-on-reply cancels steps 2..n on both channels.
+- Staging the same prospect twice → `add_outbox_item` returns None, the CLI
+  says "already queued".
+- An install on Phase 1 with rows already queued → `params_json` is empty,
+  the payload falls back to config expressions.
+
+## Acceptance criteria
+
+1. `follow_ups` with two entries stages three rows at steps 1, 2, 3, at the
+   configured cumulative delays.
+2. Step 2 does not send while step 1 is pending, approved or sending.
+3. Step 2 is cancelled when step 1 ended in anything but `sent`.
+4. A reply cancels every queued step on both channels.
+5. Claude's parameter values reach the Outbox, are what the human approves,
+   and are what Meta receives — unchanged.
+6. A parameter value with a newline, a tab or 5 spaces never reaches Meta.
+7. A follow-up template that is not Marketing is refused.
+8. Queueing the same prospect twice queues one message.
+9. `GET /api/whatsapp` reports the real standing and templates and needs no
+   secret in the response.

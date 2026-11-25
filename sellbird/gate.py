@@ -404,6 +404,35 @@ def template_placeholders(template_body: str) -> list[str]:
             for m in _PLACEHOLDER_RE.finditer(template_body or "")]
 
 
+# A template parameter is the only per-person freedom an approved template
+# leaves, so it is the one part a model writes. Meta rejects a parameter
+# carrying a newline, a tab or more than four consecutive spaces, and a
+# rejected template send costs the number's standing — so a model's answer is
+# checked here, never trusted. The length cap is ours: a template body may be
+# 1024 characters and a long parameter pushes the message past it.
+MAX_TEMPLATE_PARAM_CHARS = 120
+
+
+def template_param_problem(value: str) -> str:
+    """Why this value can't be a template parameter, or "" when it can."""
+    text = "" if value is None else str(value)
+    if not text.strip():
+        return "it is empty"
+    if any(c in text for c in ("\n", "\r")):
+        return "a template parameter can't contain a line break"
+    if "\t" in text:
+        return "a template parameter can't contain a tab"
+    if "     " in text:      # five or more spaces in a row
+        return ("a template parameter can't contain more than four spaces "
+                "in a row")
+    if len(text) > MAX_TEMPLATE_PARAM_CHARS:
+        return (f"it is {len(text)} characters; keep a template parameter "
+                f"under {MAX_TEMPLATE_PARAM_CHARS}")
+    if _PLACEHOLDER_RE.search(text):
+        return "it still has a placeholder in it"
+    return ""
+
+
 # ── Autopilot review ──────────────────────────────────────────────────────
 #
 # Websites and the replies people send reach the model, and either can carry

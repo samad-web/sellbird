@@ -642,14 +642,31 @@ def cmd_whatsapp(args):
 
     async def _queue():
         from sellbird.agents.sender import Sender
+        from sellbird.brain import Brain
         state = StateManager()
         await state.init_db()
-        sender = Sender(brain=None, state=state, config=config, env=env)
+        # With a brain, the placeholders listed in channels.whatsapp.ai_params
+        # are written for this prospect from what Sellbird found about them.
+        # Without one the configured expressions are used, so a failure here
+        # costs personalisation, never the message.
+        brain = None
+        if whatsapp.ai_params:
+            try:
+                brain = Brain(state, config.brain)
+            except Exception as e:
+                print(f"\n  Note: writing the message's details needs the brain, "
+                      f"which isn't available ({e}).")
+                print("  Falling back to channels.whatsapp.template_params.")
+        sender = Sender(brain=brain, state=state, config=config, env=env)
         item_id, why = await sender.stage_whatsapp_opener(args.prospect)
         if why:
             print(f"\n  Not queued: {why}\n")
             raise SystemExit(1)
+        steps = len(whatsapp.sequence())
         print(f"\n  Queued [{item_id}] for your approval.")
+        if steps > 1:
+            print(f"  Plus {steps - 1} follow-up(s), each held until the step before "
+                  "it has gone out.")
         print("  Read it and approve with: sellbird outbox --channel whatsapp\n")
 
     async def _backfill():

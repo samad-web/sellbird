@@ -392,6 +392,33 @@ class WhatsAppTemplate(BaseModel):
         return "" if v is None else str(v).strip()
 
 
+class WhatsAppFollowUp(BaseModel):
+    """One follow-up in a WhatsApp sequence: an approved template and a wait.
+
+    Someone who never replied is still outside Meta's 24-hour window, so a
+    follow-up is another template send, not free text — each step needs its
+    own approved Marketing template.
+    """
+
+    template: str
+    delay_days: int = 3   # days after the step before it
+
+    @field_validator("template", mode="before")
+    @classmethod
+    def _named(cls, v):
+        name = ("" if v is None else str(v)).strip()
+        if not name:
+            raise ValueError("a channels.whatsapp.follow_ups entry needs a template name")
+        return name
+
+    @field_validator("delay_days")
+    @classmethod
+    def _not_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("channels.whatsapp.follow_ups delay_days must be >= 0")
+        return v
+
+
 class WhatsAppChannelConfig(BaseModel):
     """WhatsApp through Wasi (docs/whatsapp.md).
 
@@ -424,6 +451,16 @@ class WhatsAppChannelConfig(BaseModel):
     # Meta's approved placeholder names are the user's own ("customer_name"),
     # so there is no guessing a mapping onto Sellbird's merge fields.
     template_params: dict[str, str] = {}
+    # Placeholders Claude fills per prospect, by name. An approved template's
+    # words are fixed, so its parameters are the only place a message can say
+    # something true about this one business ("you're second page for 'roofing
+    # denver'"). Anything not listed here keeps coming from template_params,
+    # which is also the fallback when the model is unavailable or its answer
+    # breaks Meta's parameter rules (gate.template_param_problem).
+    ai_params: list[str] = []
+    # What goes out after the opener if they never reply, in order. Each entry
+    # is another approved Marketing template; [] means one message and done.
+    follow_ups: list[WhatsAppFollowUp] = []
     # Dialling prefix for numbers written the way they'd be dialled locally,
     # e.g. "+91". A prefix, not an ISO code: see sellbird/phone.py.
     default_country_code: str = ""
@@ -497,10 +534,30 @@ class WhatsAppChannelConfig(BaseModel):
             )
         return self
 
+    @field_validator("ai_params", mode="before")
+    @classmethod
+    def _names(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        return [name for name in (str(x).strip() for x in v) if name]
+
     def template(self, name: str) -> WhatsAppTemplate | None:
         """The stored template by name, or None."""
         wanted = (name or "").strip().lower()
         return next((t for t in self.templates if t.name.lower() == wanted), None)
+
+    def sequence(self) -> list[tuple[int, str, int]]:
+        """The whole cold sequence as (step, template name, delay in days).
+
+        Step 1 is the opener, with no wait. ``follow_ups`` are steps 2..n,
+        each waiting its own delay after the step before it.
+        """
+        steps = [(1, self.cold_template, 0)]
+        for i, follow_up in enumerate(self.follow_ups, start=2):
+            steps.append((i, follow_up.template, follow_up.delay_days))
+        return steps
 
 
 class ChannelsConfig(BaseModel):

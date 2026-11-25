@@ -586,6 +586,25 @@ MIGRATIONS: list[str] = [
       ON outbox(channel, status, send_at);
     CREATE INDEX IF NOT EXISTS idx_prospects_phone_e164 ON prospects(phone_e164);
     """,
+    # -- v18: a WhatsApp sequence, with the same guards email has --
+    # params_json: the template parameter values AS APPROVED. A cold opener's
+    # parameters are written per prospect (the only per-person freedom an
+    # approved template leaves), so re-rendering them from config at send time
+    # would lose them and trip the "changed after approval" check on every row.
+    # uq_outbox_whatsapp_step: the double-send guard. The campaign index
+    # covers rows with a campaign only, and WhatsApp rows have none, so
+    # queueing one prospect twice queued two openers. Scoped to the steps
+    # still waiting: a sequence that has run its course doesn't stop the user
+    # starting a new one with the same person months later. The DROP is for
+    # the week this index existed without that scope.
+    """
+    ALTER TABLE outbox ADD COLUMN params_json TEXT DEFAULT '';
+    DROP INDEX IF EXISTS uq_outbox_whatsapp_step;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_outbox_whatsapp_step
+      ON outbox(prospect_id, step)
+      WHERE channel = 'whatsapp' AND kind = 'sequence'
+        AND status IN ('pending_review', 'approved', 'sending');
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -1166,26 +1185,28 @@ class StateManager:
         approved_by: str = "",
         mailbox_id: str = "",
         channel: str = "email",
+        params_json: str = "",
     ) -> str | None:
         """Queue one outgoing message. Returns its id, or None when the
         (campaign, prospect, step) slot already exists — the double-send guard.
         ``approved_by="autopilot"`` when it's queued approved on autopilot.
         ``mailbox_id`` is the inbox it leaves from ('' = the main mailbox).
         ``channel`` is 'email' or 'whatsapp'; ``to_email`` holds the recipient
-        either way — an address, or an E.164 number."""
+        either way — an address, or an E.164 number. ``params_json`` holds a
+        WhatsApp template's parameter values as approved (see v18)."""
         item_id = _new_id()
         async with self._connect() as db:
             cursor = await db.execute(
                 """INSERT OR IGNORE INTO outbox
                    (id, campaign_id, prospect_id, conversation_id, step, kind,
                     to_email, subject, body, status, send_at, provider,
-                    thread_ref, in_reply_to, mailbox_id, channel)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    thread_ref, in_reply_to, mailbox_id, channel, params_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     item_id, campaign_id, prospect_id, conversation_id,
                     int(step), kind, _norm(to_email), subject, body,
                     status, send_at, provider, thread_ref, in_reply_to, mailbox_id or "",
-                    (channel or "email").strip().lower(),
+                    (channel or "email").strip().lower(), params_json or "",
                 ),
             )
             if cursor.rowcount > 0 and approved_by:

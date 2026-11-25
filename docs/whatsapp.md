@@ -134,6 +134,69 @@ Openers are queued one at a time, on purpose. They do **not** ride along with em
 campaigns: messaging someone on two channels at once is your decision, not a side
 effect of enabling the channel.
 
+### 6. Let Claude write the parts that change
+
+An approved template's words are fixed -- that is what Meta approved. The
+placeholder *values* are the only thing that can differ per person, so those are
+worth writing properly:
+
+```yaml
+channels:
+  whatsapp:
+    ai_params: [practice_name]        # Claude writes these, per prospect
+    template_params:
+      customer_name: "{{first_name}}"  # the rest stay as merge variables
+      practice_name: "{{company}}"     # also the fallback for the above
+```
+
+Claude gets the same facts it writes a first email from -- the company's own
+site, its signals, the research notes -- and must stay inside them. What it
+writes is checked before it is queued: Meta rejects a parameter containing a
+line break, a tab or more than four spaces in a row, and a rejected template
+send costs the number's standing. Anything that fails, or a model that is
+unavailable, falls back to the `template_params` expression above, so a bad
+answer costs personalisation and never the message.
+
+The value a human approves in the Outbox is the exact value that goes to Meta.
+Change the config after approving and the message waits for a human again.
+
+### 7. Follow-ups
+
+Someone who never replied is still outside the 24-hour window, so each
+follow-up is another template send:
+
+```yaml
+channels:
+  whatsapp:
+    follow_ups:
+      - template: nudge             # another approved *Marketing* template
+        delay_days: 3
+      - template: breakup
+        delay_days: 4               # 4 days after the nudge, 7 after the opener
+```
+
+`sellbird whatsapp queue` then stages the whole sequence at once, each step at
+its own delay. The rules are email's, in the same code:
+
+- step 2 never goes out before step 1 actually has, whatever their scheduled
+  times say -- approving a batch late can't fire a whole sequence at once;
+- a step whose predecessor ended as anything but `sent` is cancelled, with the
+  reason on the row;
+- a reply stops every queued step, on **both** channels;
+- nothing is staged unless every step can be: half a sequence on someone's
+  phone is worse than none.
+
+With no `follow_ups`, it sends one message and stops.
+
+### Seeing where you stand
+
+Dashboard -> **Settings -> WhatsApp** shows the number, Meta's live quality
+rating and remaining 24-hour allowance, your own cap and what you've used
+today, and the sequence step by step with each template's category -- so a
+Utility template sitting in a cold sequence is visible before you send it,
+not after Meta reacts. It is read-only: turning the channel on, and cold
+first contact especially, stays a config-file decision.
+
 ---
 
 ## What Sellbird does and doesn't do

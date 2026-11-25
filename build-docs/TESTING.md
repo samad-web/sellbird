@@ -104,3 +104,48 @@ regression test):
 an open 24-hour window, a real Block, and a live late-failure — all need another
 person or a dud number. Everything in that list is covered by unit tests with a
 fake provider shaped on the real API's observed answers.
+
+## WhatsApp phase 2 — sequence and intelligence (2026-11-25)
+
+`tests/test_whatsapp_sequence.py` (23) and `tests/test_dashboard_whatsapp.py` (7),
+one test per acceptance criterion in the feature doc.
+
+| Criterion | Test |
+|---|---|
+| 1 three rows at steps 1-3, cumulative delays | `test_follow_ups_are_staged_as_steps_at_their_delays` |
+| 1 no follow-ups = one message | `test_no_follow_ups_configured_stages_one_message` |
+| 1 unknown template stages nothing | `test_a_follow_up_naming_an_unknown_template_stages_nothing` |
+| 2 step 2 holds while step 1 waits | `test_a_follow_up_does_not_send_while_the_opener_waits` |
+| 3 step 2 cancelled when step 1 failed | `test_a_follow_up_is_cancelled_when_the_opener_never_sent` |
+| 2/3 step 2 goes once step 1 has | `test_a_follow_up_sends_once_the_opener_has_gone_out` |
+| 4 a reply stops the rest | `test_a_reply_stops_the_remaining_steps` |
+| 5 Claude's values reach Outbox and Meta unchanged | `test_claude_writes_the_values_and_they_are_what_is_sent` |
+| 5 the prompt carries the template and the facts | `test_the_prompt_carries_the_template_and_the_facts` |
+| 5 no brain / a raising brain still sends | `test_no_brain_falls_back_to_the_configured_expression`, `test_a_brain_that_raises_does_not_lose_the_message` |
+| 6 Meta's parameter rules | 6 parametrised cases + `test_an_ordinary_value_is_fine` |
+| 6 a bad value never reaches the provider | `test_a_value_with_a_line_break_never_reaches_the_provider` |
+| 6 a hand-edited row is held | `test_a_row_whose_stored_value_is_unsendable_is_held` |
+| 7 a Utility follow-up is refused | `test_a_utility_follow_up_is_refused_at_send` |
+| 8 the double-send guard | `test_queueing_the_same_prospect_twice_queues_one_message` |
+| 8 a finished sequence doesn't block a new one | `test_a_finished_sequence_does_not_block_a_new_one` |
+| 9 the dashboard card | 7 tests in `test_dashboard_whatsapp.py`, including no key in the answer |
+
+**Failures found while building, and the fixes:**
+
+- The first `uq_outbox_whatsapp_step` had no status scope, so it blocked a
+  prospect for ever once any WhatsApp row existed. `test_whatsapp_does_not_eat_the_email_allowance`
+  (an existing test) caught it. Scoped to the steps still waiting.
+- My own criterion-1 test asserted `.days` on a timedelta that was a fraction
+  of a second negative for step 1. The test was wrong, not the code: it now
+  compares each step against step 1's time.
+
+**Regression run:** 3718 passed, 192 skipped, 0 failed (was 3686 before this
+feature). Email's sending path is the one that shared code with these changes
+(`_follow_up_order`, `add_outbox_item`, the gate) and is unchanged.
+
+**Live, read-only, against the real number:** connection ok, quality rating
+GREEN, tier TIER_250 with 249 of the 24-hour allowance left, 23 approved
+templates (18 Utility, 4 Marketing, 1 Authentication). Nothing was sent.
+
+**Local run:** the dashboard served `/` (200), the page carried the WhatsApp
+card, and `/api/whatsapp` without a token returned 401.

@@ -1334,6 +1334,94 @@ async def get_sending_mode():
     }
 
 
+def _tally(rows) -> dict:
+    """How many outbox rows sit at each status."""
+    counts: dict = {}
+    for row in rows:
+        status = str(row.get("status") or "")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+@app.get("/api/whatsapp")
+async def get_whatsapp():
+    """The WhatsApp channel: what's configured, the number's live standing
+    with Meta, the approved templates, and what's queued.
+
+    No secret in the answer. Reading Meta's standing needs a call to Wasi, so
+    it is best-effort: a failure is reported as a problem, never an error
+    page, because everything else on this card is still worth seeing.
+    """
+    from sellbird.config import load_config, load_env
+    from sellbird.integrations.mail_provider import get_whatsapp_provider
+    path = _resolve_config_file()
+    try:
+        config = load_config(str(path))
+    except Exception as e:
+        return JSONResponse({"error": f"Couldn't read {path.name}: {e}"}, status_code=500)
+    whatsapp = config.channels.whatsapp
+    state = _state()
+    await state.init_db()
+
+    sequence = []
+    for step, name, delay_days in whatsapp.sequence():
+        template = whatsapp.template(name)
+        sequence.append({
+            "step": step,
+            "template": name,
+            "delay_days": delay_days,
+            "category": (template.category if template else ""),
+            "body": (template.body if template else ""),
+            "approved": template is not None,
+        })
+
+    out = {
+        "enabled": whatsapp.enabled,
+        "provider": whatsapp.provider,
+        "configured": False,
+        "cold_first_touch": whatsapp.cold_first_touch,
+        "require_approval": whatsapp.require_approval,
+        "max_daily_sends": whatsapp.max_daily_sends,
+        "pause_below_green": whatsapp.pause_below_green,
+        "ai_params": list(whatsapp.ai_params),
+        "file": path.name,
+        "templates": [
+            {"name": tpl.name, "category": tpl.category, "language": tpl.language,
+             "body": tpl.body}
+            for tpl in whatsapp.templates
+        ],
+        "sequence": sequence,
+        "sent_today": await state.count_outbox_sent_today(channel="whatsapp"),
+        # Tallied from the rows rather than counted in SQL: the WhatsApp
+        # outbox is capped at tens a day, so there is nothing to optimise.
+        "queued": _tally(await state.get_outbox(channel="whatsapp", limit=1000)),
+        "number": {},
+        "problem": "",
+    }
+
+    provider = get_whatsapp_provider(config, load_env())
+    out["configured"] = provider is not None
+    if provider is None:
+        out["problem"] = ("WASI_API_KEY is not set in .env"
+                          if whatsapp.enabled else "")
+        return out
+    try:
+        account = await provider.account()
+    except Exception as e:
+        out["problem"] = f"Couldn't read the number's standing from Wasi: {e}"
+        return out
+    limit = account.get("messaging_limit") or {}
+    out["number"] = {
+        "display": str(account.get("display_phone_number")
+                       or account.get("phone_number") or ""),
+        "verified_name": str(account.get("verified_name") or ""),
+        "quality_rating": str(account.get("quality_rating") or ""),
+        "limit_tier": str(limit.get("tier") or ""),
+        "limit_remaining": limit.get("remaining"),
+    }
+    return out
+
+
 @app.post("/api/sending-mode")
 async def set_sending_mode(request: Request):
     """Switch it. Autopilot needs {"mode": "autopilot", "confirm": "autopilot"};

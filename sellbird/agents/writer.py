@@ -20,6 +20,7 @@ from sellbird.email_style import (
     BREAKUP_MAX_WORDS, FIRST_EMAIL_MAX_WORDS, FOLLOW_UP_MAX_WORDS,
     style_problems, tidy, with_sign_off,
 )
+from sellbird.gate import MAX_TEMPLATE_PARAM_CHARS, template_param_problem
 from sellbird.humanize import humanize, humanizer_enabled
 from sellbird.integrations.mail_provider import NATIVE_PROVIDERS
 from sellbird.models.campaign import Campaign, EmailStep
@@ -535,32 +536,7 @@ class Writer:
                 f"- Title: {prospect.title}",
                 f"- Company: {prospect.company}",
             ]
-        if prospect.industry:
-            facts.append(f"- Industry: {prospect.industry}")
-
-        company = None
-        if prospect.company_id:
-            try:
-                company = await self.state.get_company(prospect.company_id)
-            except Exception:
-                company = None
-        if company:
-            if company.location:
-                facts.append(f"- Location: {company.location}")
-            if company.description:
-                facts.append(f"- What the company says about itself: {company.description}")
-            if company.tech_stack:
-                facts.append(f"- Tools detected on their website: {', '.join(company.tech_stack[:6])}")
-            for signal in company.signals[:3]:
-                facts.append(
-                    f"- Signal ({signal.get('type', 'signal')}): {signal.get('detail', '')}"
-                )
-        facts.extend(await self._site_facts(prospect.company_id))
-        if prospect.personalization_notes:
-            facts.append(f"- Research notes: {prospect.personalization_notes}")
-        startup = await self._startup(prospect.company_id)
-        if startup is not None:
-            facts.extend(startup)
+        startup = await self._add_company_facts(facts, prospect)
 
         prompt = self.brain.load_prompt(
             "writer",
@@ -622,6 +598,106 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
         if not subject or not body:
             return None
         return {"subject": subject[:120], "body": body[:2000]}
+
+    async def _add_company_facts(self, facts: list[str], prospect) -> list[str] | None:
+        """Everything known about the prospect's company, onto ``facts``.
+
+        Returns the startup fact lines when it is one (so the caller can add
+        the playbook), else None. Shared so a WhatsApp parameter is grounded
+        in the same facts as the first email -- two groundings would drift.
+        """
+        if prospect.industry:
+            facts.append(f"- Industry: {prospect.industry}")
+        company = None
+        if prospect.company_id:
+            try:
+                company = await self.state.get_company(prospect.company_id)
+            except Exception:
+                company = None
+        if company:
+            if company.location:
+                facts.append(f"- Location: {company.location}")
+            if company.description:
+                facts.append(f"- What the company says about itself: {company.description}")
+            if company.tech_stack:
+                facts.append(f"- Tools detected on their website: {', '.join(company.tech_stack[:6])}")
+            for signal in company.signals[:3]:
+                facts.append(
+                    f"- Signal ({signal.get('type', 'signal')}): {signal.get('detail', '')}"
+                )
+        facts.extend(await self._site_facts(prospect.company_id))
+        if prospect.personalization_notes:
+            facts.append(f"- Research notes: {prospect.personalization_notes}")
+        startup = await self._startup(prospect.company_id)
+        if startup is not None:
+            facts.extend(startup)
+        return startup
+
+    async def write_whatsapp_params(self, prospect, template, wanted: list[str]) -> dict:
+        """Per-prospect values for the WhatsApp template placeholders in
+        ``wanted``: {placeholder: value}, only the ones fit to send.
+
+        An approved template's words are fixed, so its parameters are the only
+        place a WhatsApp message can say something true about this one
+        business. That makes them worth writing per prospect -- and worth
+        checking, because a parameter Meta rejects costs the number's
+        standing. A value that breaks its rules, invents a fact or comes back
+        malformed is left out, and the caller falls back to its configured
+        expression.
+        """
+        if not wanted or self.brain is None:
+            return {}
+        facts = [
+            f"- Name: {prospect.full_name()}",
+            f"- Title: {prospect.title}",
+            f"- Company: {prospect.company}",
+        ]
+        await self._add_company_facts(facts, prospect)
+
+        prompt = f"""You are filling in the blanks of a WhatsApp message template that
+{self.config.persona.company} has already had approved by Meta. You cannot change
+one word of the template. You only choose the values of the placeholders.
+
+THE APPROVED TEMPLATE (its wording is fixed):
+{fence(template.body, "approved template")}
+
+FILL IN: {', '.join(wanted)}
+
+FACTS about the person and their company. Every value you write must come
+from these facts. If a fact isn't here, you don't know it -- do not invent a
+ranking, a review count, a tool they use, or anything else:
+{fence(chr(10).join(facts), "prospect research")}
+
+{UNTRUSTED_RULE}
+
+Rules for every value:
+- It must read naturally in the place it goes, as if a person typed it.
+- One line. No line breaks, no tabs, no runs of spaces. Meta rejects those.
+- Under {MAX_TEMPLATE_PARAM_CHARS} characters. Shorter is better.
+- Plain, specific, and true. No marketing words, no exclamation marks,
+  no "I noticed", no em dashes.
+- A name placeholder gets the person's first name alone, nothing else.
+
+Return ONLY JSON: {{{', '.join(f'"{name}": "..."' for name in wanted)}}}"""
+
+        result = await self.brain.think_json(
+            prompt, session_id="sellbird-writer",
+            agent="writer", task="whatsapp_params",
+        )
+        if not isinstance(result, dict):
+            return {}
+        params: dict[str, str] = {}
+        for name in wanted:
+            value = str(result.get(name) or "").strip()
+            problem = template_param_problem(value)
+            if problem:
+                if value:
+                    logger.warning(
+                        f"Writer: dropped the WhatsApp parameter '{name}' for "
+                        f"{prospect.company or prospect.full_name()} -- {problem}.")
+                continue
+            params[name] = value
+        return params
 
     async def _write_sequence(self, prospects: list) -> list[EmailStep]:
         """Ask the brain to write a 3-email sequence."""

@@ -115,6 +115,12 @@ channels:
     pause_below_green: true   # stop cold sending if Meta's quality rating drops
     # templates: copied from `sellbird whatsapp templates`
     # template_params: {customer_name: "{{first_name}}"}
+    # ai_params: [practice_name]   # placeholders Claude writes per prospect
+    # follow_ups:                  # after the opener, if they never reply.
+    #   - template: nudge          # each one needs its own approved
+    #     delay_days: 3            # *Marketing* template: someone who didn't
+    #   - template: breakup        # answer is still outside Meta's 24h window.
+    #     delay_days: 4
 
 
 usage:

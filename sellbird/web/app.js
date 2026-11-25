@@ -1314,6 +1314,118 @@ async function loadSettings() {
   tag('reoon-status', data.reoon_api_key_set, 'set');
   tag('zerobounce-status', data.zerobounce_api_key_set, 'set');
   tag('hunter-status', data.hunter_api_key_set, 'set');
+  loadWhatsApp();
+}
+
+// ── WhatsApp (channels.whatsapp, through Wasi) ──
+// Read-only on purpose. Turning the channel on, and cold first contact in
+// particular, is a decision with a banned number on the other side of it, so
+// it is made in the config file, not with a click here.
+function qualityTag(rating) {
+  const r = (rating || '').toUpperCase();
+  if (!r) return '<span class="email-tag guess">unknown</span>';
+  const cls = r === 'GREEN' ? 'verified' : (r === 'YELLOW' ? 'risky' : 'invalid');
+  return '<span class="email-tag ' + cls + '">' + escHtml(r.toLowerCase()) + '</span>';
+}
+
+function whatsappCard(w) {
+  if (!w) return '<div class="card muted">Couldn’t read the WhatsApp settings.</div>';
+  if (w.error) return '<div class="card muted">' + escHtml(w.error) + '</div>';
+
+  let html = '<div class="card"><h3>WhatsApp ' +
+    (w.enabled ? '<span class="email-tag verified">on</span>'
+               : '<span class="email-tag guess">off</span>') + '</h3>';
+
+  if (!w.enabled) {
+    html += '<p>Sellbird reaches people on WhatsApp through Wasi, on Meta’s official Cloud API. ' +
+      'Everything is shared with email: the Outbox waits for your approval, suppressions apply, ' +
+      'and a reply on either channel stops the queued messages on both.</p>' +
+      '<p class="muted">Read <code>docs/whatsapp.md</code> before turning it on. Meta only delivers a ' +
+      '<i>first</i> message as a template it approved in advance, and cold outreach on WhatsApp is the ' +
+      'main way a number gets banned. Set <code>channels.whatsapp.enabled: true</code> in <code>' +
+      escHtml(w.file || 'sellbird.yaml') + '</code>.</p></div>';
+    return html;
+  }
+
+  if (w.problem) html += '<div class="banner wait">' + icon('alert') + '<div>' + escHtml(w.problem) + '</div></div>';
+  const n = w.number || {};
+  html += '<div class="facts">' +
+    '<div class="group"><span class="desc">Number</span><span>' +
+      (n.display ? escHtml(n.display) : '<span class="muted">not read</span>') +
+      (n.verified_name ? ' <span class="muted">' + escHtml(n.verified_name) + '</span>' : '') + '</span></div>' +
+    '<div class="group"><span class="desc">Meta’s quality rating</span><span>' + qualityTag(n.quality_rating) +
+      (w.pause_below_green ? ' <span class="muted">cold sending stops below green</span>' : '') + '</span></div>' +
+    '<div class="group"><span class="desc">Meta’s allowance</span><span>' +
+      (n.limit_remaining === null || n.limit_remaining === undefined
+        ? '<span class="muted">not read</span>'
+        : escHtml(String(n.limit_remaining)) + ' left in the next 24h') +
+      (n.limit_tier ? ' <span class="muted">tier ' + escHtml(n.limit_tier) + '</span>' : '') + '</span></div>' +
+    '<div class="group"><span class="desc">Your own cap</span><span>' + escHtml(String(w.sent_today)) +
+      ' sent today of ' + escHtml(String(w.max_daily_sends)) + '</span></div>' +
+    '<div class="group"><span class="desc">Approval</span><span>' +
+      (w.require_approval ? 'every message waits in the Outbox'
+                          : '<b>autopilot</b> — messages send on their own') + '</span></div>' +
+    '<div class="group"><span class="desc">Cold first contact</span><span>' +
+      (w.cold_first_touch ? '<span class="email-tag risky">on</span>'
+                          : 'off — only people who wrote first') + '</span></div>' +
+    '</div>';
+
+  const queued = w.queued || {};
+  const waiting = Object.keys(queued).map(function (s) {
+    return escHtml(String(queued[s])) + ' ' + escHtml(s.replace(/_/g, ' '));
+  }).join(' · ');
+  if (waiting) html += '<p class="muted">In the Outbox: ' + waiting +
+    ' <a href="#" onclick="goTab(\'outbox\');return false">open it</a></p>';
+
+  // The sequence: what actually goes out, in order. A step whose template
+  // isn't among the approved ones can never send, so it says so here.
+  html += '<div class="subhead">The cold sequence</div>';
+  if (!w.cold_first_touch) {
+    html += '<p class="muted">Cold first contact is off, so this sequence is not used. ' +
+      'Replies are still read and answered.</p>';
+  }
+  const seq = w.sequence || [];
+  if (!seq.length || !seq[0].template) {
+    html += '<p class="muted">No opener set. Point <code>channels.whatsapp.cold_template</code> at an ' +
+      'approved <b>Marketing</b> template.</p>';
+  } else {
+    html += '<table class="file-table"><thead><tr><th>Step</th><th>Template</th><th>Category</th>' +
+      '<th>Wait</th><th>Text</th></tr></thead><tbody>';
+    seq.forEach(function (s) {
+      const marketing = (s.category || '').toLowerCase() === 'marketing';
+      html += '<tr><td>' + escHtml(String(s.step)) + '</td><td>' + escHtml(s.template) + '</td><td>' +
+        (s.approved
+          ? (marketing ? escHtml(s.category)
+             : '<span class="email-tag invalid">' + escHtml(s.category || 'no category') + '</span>')
+          : '<span class="email-tag invalid">not approved</span>') + '</td><td>' +
+        (s.delay_days ? escHtml(String(s.delay_days)) + ' days' : 'at once') + '</td><td class="muted">' +
+        escHtml(s.body || '') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    const bad = seq.filter(function (s) {
+      return !s.approved || (s.category || '').toLowerCase() !== 'marketing';
+    });
+    if (bad.length) html += '<p class="muted">A step needs an approved <b>Marketing</b> template: a cold ' +
+      'opener sent as a Utility template is the policy breach Meta punishes. Run <code>sellbird whatsapp ' +
+      'templates</code> after Meta approves one.</p>';
+  }
+  if ((w.ai_params || []).length) {
+    html += '<p class="muted">Written for each prospect by Claude: ' +
+      w.ai_params.map(escHtml).join(', ') +
+      '. The template’s own words are fixed; only these values change.</p>';
+  } else {
+    html += '<p class="muted">Template values come from <code>channels.whatsapp.template_params</code>. ' +
+      'List a placeholder under <code>channels.whatsapp.ai_params</code> to have Claude write it for each ' +
+      'prospect from what Sellbird found about them.</p>';
+  }
+  return html + '</div>';
+}
+
+async function loadWhatsApp() {
+  const el = document.getElementById('whatsapp-card');
+  if (!el) return;
+  const data = await api('/api/whatsapp');
+  el.innerHTML = whatsappCard(data);
 }
 
 function saveGmail() {

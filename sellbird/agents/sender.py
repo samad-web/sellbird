@@ -11,6 +11,7 @@ Native flow:
 """
 
 import asyncio
+import json
 import logging
 import random
 import re
@@ -26,7 +27,7 @@ from sellbird import extensions
 from sellbird.gate import (
     EMAIL_RE, autopilot_review, do_not_contact_match, pre_send_check,
     render_template, sendable_email_statuses, template_mismatch,
-    template_placeholders,
+    template_param_problem, template_placeholders,
 )
 from sellbird.send_hooks import NO_HEADERS_HOLD, SendCheck, SendHookError, extra_headers, first_verdict
 from sellbird.send_window import in_window, next_send_time, recipient_country, recipient_zone
@@ -797,7 +798,11 @@ class Sender:
         else:
             gap = timedelta(days=delay)
         ready_at = sent_at + max(MIN_FOLLOW_UP_GAP, gap)
-        window = send_window_of(self.config)
+        # Each channel has its own window: rescheduling a WhatsApp follow-up
+        # into email's office hours would be the wrong promise to keep.
+        window = (self.config.channels.whatsapp.send_window
+                  if (item.get("channel") or "email") == "whatsapp"
+                  else send_window_of(self.config))
         if window is not None and prospect is not None:
             ready_at = next_send_time(ready_at, await self._zone_or_default(prospect), window)
         if _utcnow() >= ready_at:
@@ -1402,8 +1407,17 @@ class Sender:
             # breach Meta punishes by re-categorising or pulling the template.
             return {}, (f"template '{name}' is a {template.category or 'non-Marketing'} "
                         "template; a cold first message needs an approved Marketing one")
-        params = {key: self._render(expression, prospect)
-                  for key, expression in expressions.items()}
+        # The values as approved, when the row carries them: a parameter
+        # written for this one prospect can't be recovered from config, and
+        # re-rendering from config would make every such row look changed.
+        params = _stored_params(item)
+        if not params:
+            params = {key: self._render(expression, prospect)
+                      for key, expression in expressions.items()}
+        for key, value in sorted(params.items()):
+            problem = template_param_problem(value)
+            if problem:
+                return {}, f"the value for {key} can't be sent: {problem}"
         missing = [p for p in template_placeholders(template.body) if not params.get(p)]
         if missing:
             return {}, (f"template '{name}' needs {', '.join(missing)} — add them to "
@@ -1417,14 +1431,59 @@ class Sender:
             return {}, problem
         return {"template": template.name, "params": params}, ""
 
-    async def stage_whatsapp_opener(self, prospect_id: str) -> tuple[str, str]:
-        """Queue one cold WhatsApp opener for a prospect. (row id, why not).
+    async def _whatsapp_params_for(self, prospect, template) -> tuple[dict, str]:
+        """Every parameter one template send needs, or ({}, why not).
 
-        Queued, not sent: it joins the Outbox at pending_review like anything
-        else. Deliberately one prospect at a time, called by the CLI or the
+        Placeholders listed in ``channels.whatsapp.ai_params`` are written for
+        this prospect by the Writer; the rest come from the configured
+        expressions. Whoever wrote a value, it is checked against Meta's
+        parameter rules here: a rejected template send costs the number's
+        standing, so this fails closed and says which value.
+        """
+        whatsapp = self.config.channels.whatsapp
+        placeholders = template_placeholders(template.body)
+        params = {key: self._render(expression, prospect)
+                  for key, expression in (whatsapp.template_params or {}).items()}
+        wanted = [p for p in placeholders if p in whatsapp.ai_params]
+        if wanted and self.brain is not None:
+            from sellbird.agents.writer import Writer
+            try:
+                written = await Writer(
+                    self.brain, self.state, self.config, self.env
+                ).write_whatsapp_params(prospect, template, wanted)
+            except Exception as e:
+                # The configured expressions still stand; say so and go on.
+                logger.warning(f"Sender: couldn't write WhatsApp parameters for "
+                               f"{prospect.company or prospect.full_name()} ({e}) — "
+                               "using channels.whatsapp.template_params.")
+                written = {}
+            params.update(written)
+        for key, value in sorted(params.items()):
+            problem = template_param_problem(value)
+            if problem:
+                return {}, f"the value for {key} can't be sent: {problem}"
+        missing = [p for p in placeholders if not params.get(p)]
+        if missing:
+            return {}, (f"template '{template.name}' needs {', '.join(missing)} — add "
+                        "them to channels.whatsapp.template_params or "
+                        "channels.whatsapp.ai_params")
+        return params, ""
+
+    async def stage_whatsapp_opener(self, prospect_id: str) -> tuple[str, str]:
+        """Queue a cold WhatsApp sequence for a prospect. (step 1's row id, why not).
+
+        The opener and every ``channels.whatsapp.follow_ups`` step, each at its
+        own delay. Queued, not sent: they join the Outbox at pending_review
+        like anything else, and the drain holds a follow-up until the step
+        before it has actually gone out.
+
+        Deliberately one prospect at a time, called by the CLI or the
         dashboard — WhatsApp openers do not ride along with email campaigns,
         because contacting someone on two channels at once is a decision the
         user makes, not a side effect of turning the channel on.
+
+        Nothing is queued unless every step can be: half a sequence on
+        someone's phone is worse than none.
         """
         whatsapp = self.config.channels.whatsapp
         if not whatsapp.enabled:
@@ -1453,39 +1512,52 @@ class Sender:
         suppressed = await self.state.is_suppressed(number)
         if suppressed:
             return "", f"suppressed ({suppressed})"
-        template = whatsapp.template(whatsapp.cold_template)
-        if template is None:
-            return "", (f"template '{whatsapp.cold_template}' isn't in "
-                        "channels.whatsapp.templates — run `sellbird whatsapp templates`")
-        params = {key: self._render(expression, prospect)
-                  for key, expression in (whatsapp.template_params or {}).items()}
-        missing = [p for p in template_placeholders(template.body) if not params.get(p)]
-        if missing:
-            return "", (f"template '{template.name}' needs {', '.join(missing)} — add "
-                        "them to channels.whatsapp.template_params")
-        body = render_template(template.body, params)
-        problem = template_mismatch(body, template.body)
-        if problem:
-            return "", problem
+        # Every step rendered and checked before anything is queued.
+        planned = []
+        waited = 0
+        for step, name, delay_days in whatsapp.sequence():
+            template = whatsapp.template(name)
+            if template is None:
+                where = ("channels.whatsapp.cold_template" if step == 1
+                         else f"channels.whatsapp.follow_ups step {step}")
+                return "", (f"template '{name}' ({where}) isn't in "
+                            "channels.whatsapp.templates — run `sellbird whatsapp templates`")
+            params, reason = await self._whatsapp_params_for(prospect, template)
+            if reason:
+                return "", reason
+            body = render_template(template.body, params)
+            problem = template_mismatch(body, template.body)
+            if problem:
+                return "", problem
+            waited += max(0, delay_days)
+            planned.append((step, template.name, body, params, waited))
+
         await sync_sending_mode(self.config, self.state)
         require_approval = whatsapp.require_approval
-        item_id = await self.state.add_outbox_item(
-            prospect_id=prospect.id,
-            to_email=number,
-            # WhatsApp has no subject, so the column carries which approved
-            # template this is. The drain re-renders it and checks the match.
-            subject=template.name,
-            body=body,
-            send_at=_utcnow().isoformat(),
-            status="pending_review" if require_approval else "approved",
-            channel="whatsapp",
-            provider=self.whatsapp.name,
-            approved_by="" if require_approval else "autopilot",
-        )
-        if not item_id:
-            return "", "already queued"
+        now = _utcnow()
+        first_id = ""
+        for step, name, body, params, waited in planned:
+            item_id = await self.state.add_outbox_item(
+                prospect_id=prospect.id,
+                step=step,
+                to_email=number,
+                # WhatsApp has no subject, so the column carries which approved
+                # template this is. The drain re-renders it and checks the match.
+                subject=name,
+                body=body,
+                params_json=json.dumps(params, ensure_ascii=False),
+                send_at=(now + timedelta(days=waited)).isoformat(),
+                status="pending_review" if require_approval else "approved",
+                channel="whatsapp",
+                provider=self.whatsapp.name,
+                approved_by="" if require_approval else "autopilot",
+            )
+            if step == 1:
+                if not item_id:
+                    return "", "already queued"
+                first_id = item_id
         await self.state.queue_prospect_if_unsent(prospect.id)
-        return item_id, ""
+        return first_id, ""
 
     async def _drain_whatsapp(self):
         """Send due, approved WhatsApp rows through Wasi."""
@@ -1536,6 +1608,15 @@ class Sender:
             if blocked:
                 await self.state.update_outbox_item(
                     item["id"], status=blocked[0], error=blocked[1])
+                continue
+            # Step 2 never goes before step 1 has, and is dropped when step 1
+            # never will. Same rule, same code, as an email follow-up.
+            order = await self._follow_up_order(item, prospect)
+            if order == "wait":
+                continue
+            if isinstance(order, tuple):
+                await self.state.update_outbox_item(
+                    item["id"], status=order[0], error=order[1])
                 continue
             if (window is not None and item["kind"] == "sequence"
                     and await self._outside_window(
@@ -1643,6 +1724,21 @@ def _names(prospect) -> list[str]:
     if prospect is None:
         return []
     return [n for n in (prospect.company, prospect.first_name, prospect.last_name) if n]
+
+
+def _stored_params(item: dict) -> dict:
+    """A WhatsApp row's template parameters as they were approved ({} when
+    the row has none: every row queued before params_json existed)."""
+    raw = (item.get("params_json") or "").strip()
+    if not raw:
+        return {}
+    try:
+        stored = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(stored, dict):
+        return {}
+    return {str(k): str(v) for k, v in stored.items() if str(v or "").strip()}
 
 
 def _collapse(text: str) -> str:
