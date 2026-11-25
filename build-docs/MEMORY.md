@@ -125,6 +125,17 @@ Don't silently change it; do keep volume low and watch the bounce rate.
 and nothing sets the header). It was scoped as a small change if Resend-plus-
 another-mailbox is ever wanted, and was not built.
 
+### 2026-11-25 — Sender: a named person's own M365 mailbox
+Briefly sent through a shared Google Workspace mailbox (Gmail provider, verified
+end to end). The operator then chose their own named Microsoft 365 mailbox on
+the same domain, for credibility: a person, not a support inbox. Provider back
+to `microsoft`; persona and the email-rules sign-off use their name.
+- M365 DKIM is **not enabled** for the domain (no `selector1._domainkey`), and
+  enabling it needs a tenant admin. Not a blocker at this volume: SPF includes
+  Outlook, so DMARC passes on SPF alignment. Enable it when an admin can.
+- Cold emails offer a **call first**; the 7-day trial is given after the call,
+  so cold emails link only the booking page (operator's decision).
+
 ### 2026-11-25 — What Sellbird sells here: Auratel
 Auratel is the product, not the operator's agency. Train on Auratel's own site
 so the emails pitch it. The agency domain is only the sending identity.

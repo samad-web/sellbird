@@ -442,6 +442,39 @@ def cmd_companies(args):
     print()
 
 
+def cmd_import(args):
+    """Import a lead list from CSV as new prospects."""
+    from sellbird.config import load_env
+    from sellbird.importer import ImportFileError, import_rows, read_rows
+    from sellbird.state import StateManager
+
+    try:
+        rows = read_rows(Path(args.file))
+    except (ImportFileError, OSError, UnicodeDecodeError) as e:
+        print(f"\n  Can't import: {e}\n")
+        sys.exit(1)
+
+    async def _import():
+        state = StateManager()
+        await state.init_db()
+        return await import_rows(state, rows, env=load_env(), dry_run=args.dry_run)
+
+    result = asyncio.run(_import())
+    verb = "Would import" if args.dry_run else "Imported"
+    print(f"\n  {verb} {result.total} of {len(rows)} rows.")
+    for status, n in sorted(result.imported.items()):
+        print(f"    {status:<22} {n}")
+    for number, reason in result.skipped:
+        print(f"    row {number}: skipped, {reason}")
+    if not args.dry_run and result.imported.get("guess"):
+        print("\n  'guess' addresses are never written for or sent. Add a verifier key "
+              "(REOON_API_KEY, ZEROBOUNCE_API_KEY or HUNTER_API_KEY) to .env and import again.")
+    if result.total and not args.dry_run:
+        print("\n  Next: Sellbird drafts for them on its next cycle ('sellbird run'), "
+              "and every draft waits in the Outbox for your approval.")
+    print()
+
+
 def cmd_export(args):
     """Export the prospect list as a sequencer-ready CSV."""
     from sellbird.state import StateManager
@@ -1536,6 +1569,15 @@ def main():
     sub.add_argument("--status", default="", help="Comma-separated pipeline statuses (e.g. new,queued); opted-out contacts stay excluded")
     sub.add_argument("--all", action="store_true", help="Export the raw list without filters, including opted-out contacts (not for outreach)")
     sub.set_defaults(func=cmd_export)
+
+    # sellbird import
+    sub = subparsers.add_parser(
+        "import", help="Import a lead list (CSV) as new prospects; drafts still wait for approval"
+    )
+    sub.add_argument("file", help="CSV with at least company and email columns")
+    sub.add_argument("--dry-run", action="store_true",
+                     help="Check the file and report, without verifying or saving anything")
+    sub.set_defaults(func=cmd_import)
 
     # sellbird companies
     sub = subparsers.add_parser(

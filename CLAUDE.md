@@ -369,6 +369,7 @@ Users will come back with questions and tasks. Common ones:
 - **"Train Sellbird on a different product"** → `sellbird train <new-url>`
 - **"How do I see the database?"** → It's at `data/sellbird.db`. They can open it with any SQLite tool, or ask you to query it.
 - **"I just want the prospect list"** → `sellbird export` writes a sequencer-ready CSV (verified/risky emails only; `--all` for everything). Also available as Export buttons on the dashboard's Contacts tab. Sellbird is valuable purely as a list-builder even if the user never lets it send.
+- **"I already have a lead list"** → `sellbird import leads.csv` (`--dry-run` first). Needs company and email columns; first_name, last_name, title, website, phone, city, industry and notes are optional, and notes become the fact the first email opens with. Each address is graded by the configured verifier, never taken from the file, so without a verifier key they stay `guess` and are never sent. Drafts still wait in the Outbox.
 
 ---
 
@@ -411,6 +412,7 @@ sellbird usage                 # Claude quota gauges + per-agent token usage (no
 sellbird export                # Deliverable prospects → sequencer-ready CSV (prospects.csv)
 sellbird precleared-key [--email ADDRESS]  # Free Precleared key for the cold-email check, saved to .env
 sellbird export --all          # Full raw list, no filters
+sellbird import leads.csv      # Load a lead list (company + email columns); --dry-run checks only
 sellbird companies             # Company register CSV: every company, its fit score, and why it wasn't contacted
 sellbird gmail auth            # One-time Gmail OAuth (when provider: gmail)
 sellbird gmail test            # Verify the Gmail connection

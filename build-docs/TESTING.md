@@ -255,3 +255,8 @@ reported rather than silently replaced. The first was confirmed to fail with
 the old line put back. On the way, my new helper reused the name of an
 existing `_config()` in the same file and broke two old tests — caught on the
 first run, renamed. Full suite: 3789 passed, 192 skipped.
+
+## CSV import (2026-11-25)
+
+- `tests/test_importer.py`: 8 tests, one per acceptance criterion (AC1–AC7) plus the row cap. All pass.
+- Found while writing them: async fixtures need `pytest_asyncio.fixture` (strict mode). Fixed in the test setup, not the feature.
