@@ -47,3 +47,30 @@ What was built, fixed and committed, per feature. The product-facing changelog i
 **Already at parity, so untouched:** reading replies. `_process_reply` and
 `_queue_native_reply` were channel-aware from phase 1 — inbound WhatsApp is
 classified, staged and answered by the same code that answers email.
+
+## Multiple projects from one install (2026-11-25)
+
+**Built**
+- `sellbird/workspaces.py`: a registry of named projects (`workspaces.json` in
+  the per-user app folder, outside every project).
+- `--workspace NAME|PATH` on every command, plus `SELLBIRD_WORKSPACE`. The flag
+  wins. Resolved before `sellbird.paths` is imported and applied by setting
+  `SELLBIRD_HOME`, so the flag, the variable and Docker all take one path
+  through the code.
+- `sellbird workspace list | add | remove | which`.
+- A `[workspace: name]` line on stderr for every command, whenever a workspace
+  is named — the point of the feature, not decoration: `outbox --approve-all`
+  in the wrong terminal approves the wrong company's email.
+- `GET /api/instance` now reports the workspace, and the dashboard puts it in
+  the browser tab title, so two dashboards on two ports are distinguishable.
+
+**Not built, because it already existed:** the isolation itself.
+`paths.resolve_home` has always honoured `SELLBIRD_HOME`, `workspace_home.Home`
+already carries every per-project path in a ContextVar, `StateManager` already
+reads `current_home().db_path`, and the dashboard already runs per-home. This
+change adds the ergonomics that make the existing isolation safe to use, and no
+new isolation.
+
+**Known limit:** two projects draw on the same Claude subscription, so
+`usage.max_daily_claude_percent` is a share of one quota in each config. Two
+projects at 80% will exhaust it. Documented, not enforced.

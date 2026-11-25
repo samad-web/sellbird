@@ -69,3 +69,25 @@ Claude never enables it for them.
   looked only at money already spent, so a provider that billed more than it
   estimated finished one whole query past the cap — $4.00 against a $3.00 cap
   in the repo's own test, which asserted the stop message but never the spend.
+
+### 2026-11-25 — WhatsApp reached parity with email, and reply handling was already there
+Phase 2 added the outbound sequence (`follow_ups`) and per-prospect template
+parameters (`ai_params`). Reading replies needed nothing: `_process_reply` and
+`_queue_native_reply` were channel-aware from phase 1. A cold WhatsApp
+follow-up needs its own approved **Marketing** template, because someone who
+never replied is still outside Meta's 24-hour window — that is a Meta rule, not
+a Sellbird choice, so don't "simplify" it away.
+
+### 2026-11-25 — Multi-project was already possible; only the ergonomics were missing
+`SELLBIRD_HOME` has always isolated a project completely. `--workspace` is a
+name-to-path registry in front of it, and the important part is the
+`[workspace: …]` line every command prints: the risk with several projects is
+not that they share data, it's acting on the wrong one.
+
+Two traps worth remembering:
+- Reading the registry imports `sellbird.paths`, which settles `PROJECT_ROOT` at
+  import. Anything that resolves a workspace must recompute `paths.PROJECT_ROOT`
+  after setting `SELLBIRD_HOME`. This only works because `cli.py` imports
+  nothing from `sellbird` at module level — keep it that way.
+- A test that calls `workspaces.remove(name)` without `path=` edits the user's
+  real registry. Always pass a tmp path.

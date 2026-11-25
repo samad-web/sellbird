@@ -874,8 +874,16 @@ async def get_sellbird_status():
         paused = await state.get_setting("sending_paused") or ""
     except Exception:
         paused = ""
+    # The project this dashboard serves, for the browser tab title. Here and
+    # not on /api/instance, which needs no token: an unauthenticated endpoint
+    # should say only enough to identify the dashboard, and the name of
+    # somebody's project isn't that.
+    from sellbird import workspaces
+    from sellbird.workspace_home import current_home
+
     return {"running": pid is not None, "pid": pid, "started_at": started,
-            "sending_paused": paused}
+            "sending_paused": paused,
+            "workspace": workspaces.label(str(current_home().root))}
 
 
 @app.post("/api/sellbird/start")

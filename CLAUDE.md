@@ -73,6 +73,15 @@ People will ask "how does this work?" — explain it simply:
   number's live standing and the sequence. Never turn `cold_first_touch` on yourself
   without the user asking for it in so many words.
 
+- **"Can it run for more than one business?"** → Yes. `sellbird workspace add
+  <name> <folder>` registers a project, and `--workspace <name>` (or
+  `SELLBIRD_WORKSPACE`) picks one per command; each keeps its own config,
+  mailbox, prospects, database and dashboard token, and every command prints
+  which project it acted on. Two dashboards need two ports
+  (`--port`). Both projects draw on the *same* Claude subscription, so
+  `usage.max_daily_claude_percent` in each config is a share of one quota — say
+  so before someone sets two projects to 80%. See `docs/multiple-projects.md`.
+
 - **"What's the dashboard?"** → Have the user run `sellbird dashboard` in their own terminal and open the private link it prints (`http://127.0.0.1:5555/#token=…`; `sellbird dashboard --url` prints it again). Don't read, print or repeat the token yourself: it unlocks the dashboard. It opens on **Today** — anything waiting on a decision, then the pipeline. Tabs for Signals, Companies, Contacts, Campaigns, Outbox, Conversations, Activity, Usage, Settings.
 
 - **"What are signals?"** → Signals are the facts Sellbird collects about a business: who its current agency is, whether it's running ads, whether it has online booking, how it ranks. **Sellbird proposes; you confirm.** Nothing is collected until the user says yes on the Signals tab (or `sellbird signals --confirm ...`). That keeps spend intentional and makes every prospect list explainable — a cohort is a query over signals a human chose, not a black box.
@@ -394,6 +403,8 @@ source .venv/bin/activate    # Always activate venv first
 sellbird run                   # Start the heartbeat loop
 sellbird dashboard             # Web UI at http://127.0.0.1:5555 (open the printed link)
 sellbird setup                 # Re-run setup wizard
+sellbird workspace             # Projects on this install; add/remove/which
+sellbird --workspace <name> …  # Run any command against one project
 sellbird train <url>           # Train on a product website
 sellbird status                # Pipeline summary
 sellbird usage                 # Claude quota gauges + per-agent token usage (no dollar costs — subscription plans aren't billed per token)

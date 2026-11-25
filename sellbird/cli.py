@@ -7,6 +7,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+NEWLINE = chr(10)
+
 
 MIN_PYTHON = (3, 11)
 
@@ -1222,9 +1224,120 @@ def cmd_suppressions(args):
         sys.exit(code)
 
 
+def _pick_workspace():
+    """Point SELLBIRD_HOME at the project asked for, before anything reads it.
+
+    sellbird.paths decides the home folder once, at import, so this has to run
+    first -- which is why cli.py imports nothing from sellbird at module level.
+    Setting SELLBIRD_HOME rather than adding a second mechanism means
+    --workspace, the environment variable and Docker all take the same path
+    through the code.
+    """
+    import os
+
+    from sellbird import workspaces
+
+    wanted = workspaces.early_workspace(sys.argv[1:])
+    if not wanted:
+        return
+    try:
+        root = workspaces.resolve(wanted)
+    except workspaces.WorkspaceError as e:
+        print(f"{NEWLINE}  {e}{NEWLINE}", file=sys.stderr)
+        sys.exit(2)
+    from sellbird import paths
+
+    os.environ[paths.HOME_ENV] = str(root)
+    # Reading the registry imported sellbird.paths, which settles PROJECT_ROOT
+    # at import. Recompute it now the variable is set. Safe because nothing
+    # else has imported it yet: cli.py imports nothing from sellbird at module
+    # level, and every module that copies PROJECT_ROOT is imported by a
+    # command, after this.
+    paths.PROJECT_ROOT = paths.resolve_home()
+
+
+def _say_which_workspace(root: str) -> None:
+    """One line naming the project a command is about to act on.
+
+    On stderr: a command's stdout may be a CSV or a protocol. Silent for the
+    default home, so a single-project install looks exactly as it did.
+    """
+    import os
+
+    from sellbird import workspaces
+
+    if not (os.environ.get(workspaces.WORKSPACE_ENV)
+            or workspaces.early_workspace(sys.argv[1:])):
+        return
+    name = workspaces.label(root)
+    print(f"  [workspace: {name or root}]", file=sys.stderr)
+
+
+def cmd_workspace(args):
+    """Several projects from one install, each with its own everything."""
+    from sellbird import workspaces
+    from sellbird.paths import PROJECT_ROOT
+
+    action = getattr(args, "workspace_action", "list") or "list"
+
+    if action == "which":
+        name = workspaces.label(PROJECT_ROOT)
+        print(f"{NEWLINE}  {name or '(unregistered)'}  {PROJECT_ROOT}{NEWLINE}")
+        return
+
+    if action == "add":
+        if not args.name:
+            print(f"{NEWLINE}  Which name? sellbird workspace add <name> [path]{NEWLINE}")
+            raise SystemExit(2)
+        try:
+            name, root = workspaces.add(args.name, args.path or None, force=args.force)
+        except workspaces.WorkspaceError as e:
+            print(f"{NEWLINE}  {e}{NEWLINE}")
+            raise SystemExit(1)
+        print(f"{NEWLINE}  '{name}' is {root}")
+        print(f"  Use it with:  sellbird --workspace {name} status")
+        print(f"  Or set it for this terminal:  "
+              f"{workspaces.WORKSPACE_ENV}={name}{NEWLINE}")
+        return
+
+    if action == "remove":
+        try:
+            name = workspaces.remove(args.name)
+        except workspaces.WorkspaceError as e:
+            print(f"{NEWLINE}  {e}{NEWLINE}")
+            raise SystemExit(1)
+        print(f"{NEWLINE}  Forgot '{name}'. Its folder and data are untouched.{NEWLINE}")
+        return
+
+    known = workspaces.load()
+    here = workspaces.label(PROJECT_ROOT)
+    print(f"{NEWLINE}  Your projects")
+    print("  " + "=" * 62)
+    if not known:
+        print("  None registered yet. This install uses one folder:")
+        print(f"    {PROJECT_ROOT}")
+        print(f"{NEWLINE}  Add a second project:")
+        print("    sellbird workspace add acme ~/sellbird/acme")
+        print("    sellbird --workspace acme setup")
+        print(f"{NEWLINE}  Each one keeps its own config, mailbox, prospects, database and")
+        print(f"  dashboard token. Nothing is shared.{NEWLINE}")
+        return
+    for name, folder in sorted(known.items()):
+        from pathlib import Path as _Path
+        exists = _Path(folder).expanduser().is_dir()
+        mark = "*" if name == here else " "
+        note = "" if exists else "   (folder missing)"
+        print(f"  {mark} {name:<16} {folder}{note}")
+    print(f"{NEWLINE}  * is the one this terminal is on.")
+    print(f"  Switch with --workspace <name>, or {workspaces.WORKSPACE_ENV}=<name>.")
+    print(f"  Two at once need two ports: sellbird --workspace b dashboard "
+          f"--port 5556{NEWLINE}")
+
+
 def main():
     from sellbird.textio import utf8_stdio
     utf8_stdio()
+    _pick_workspace()
     from sellbird.paths import PROJECT_ROOT
     project_root = str(PROJECT_ROOT)
 
@@ -1232,6 +1345,13 @@ def main():
         prog="sellbird",
         description="Sellbird — the open-source outreach platform. Make the first move.",
     )
+    # Read before this parser exists (see _pick_workspace); declared here so
+    # --help documents it and argparse accepts it.
+    parser.add_argument(
+        "--workspace", metavar="NAME|PATH", default=None,
+        help="Which project to act on: a name from 'sellbird workspace list', "
+             "or a folder. Also SELLBIRD_WORKSPACE. Each project keeps its own "
+             "config, mailbox, prospects and database.")
     subparsers = parser.add_subparsers(dest="command")
 
     # sellbird install
@@ -1276,6 +1396,20 @@ def main():
     sub.add_argument("--url", action="store_true",
                      help="Print the unlock link (with its token) and exit")
     sub.set_defaults(func=cmd_dashboard)
+
+    # sellbird workspace
+    sub = subparsers.add_parser(
+        "workspace", help="Several projects from one install: list, add, remove")
+    sub.add_argument("workspace_action", nargs="?", default="list",
+                     choices=["list", "add", "remove", "which"],
+                     help="list (default), add <name> [path], remove <name>, "
+                          "which (the project this terminal is on)")
+    sub.add_argument("name", nargs="?", default="", help="The project's short name")
+    sub.add_argument("path", nargs="?", default="",
+                     help="Its folder (default: the current directory)")
+    sub.add_argument("--force", action="store_true",
+                     help="With add: point an existing name somewhere else")
+    sub.set_defaults(func=cmd_workspace)
 
     # sellbird status
     sub = subparsers.add_parser("status", help="Show pipeline status")
@@ -1459,6 +1593,7 @@ def main():
     args = parser.parse_args()
     _carry_over_from_harvey()
     args._project_root = project_root
+    _say_which_workspace(project_root)
 
     # Fill the home folder before any command. Silent: a command's stdout may
     # be a protocol or a file. A failure is one stderr line, and the command

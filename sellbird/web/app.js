@@ -1523,6 +1523,10 @@ async function testInstantly() {
 
 async function loadSellbirdStatus() {
   const data = await api('/api/sellbird/status');
+  // Which project this dashboard serves, in the tab title: two dashboards on
+  // two ports look identical otherwise, and the Outbox is one click from
+  // sending. Silent for a single-project install, which has no name.
+  if (data && data.workspace) document.title = 'Sellbird \u2014 ' + data.workspace;
   const headerDot = document.getElementById('header-dot');
   const headerText = document.getElementById('header-status-text');
 

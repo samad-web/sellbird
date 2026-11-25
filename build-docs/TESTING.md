@@ -149,3 +149,58 @@ templates (18 Utility, 4 Marketing, 1 Authentication). Nothing was sent.
 
 **Local run:** the dashboard served `/` (200), the page carried the WhatsApp
 card, and `/api/whatsapp` without a token returned 401.
+
+## Multiple projects (2026-11-25)
+
+`tests/test_workspaces.py` (35), one or more per acceptance criterion in
+`build-docs/features/multi-project.md`.
+
+| Criterion | Test |
+|---|---|
+| 1 a name resolves to its folder | `test_a_registered_name_resolves_to_its_folder` |
+| 2 an unknown name stops, listing the names | `test_an_unknown_name_stops_and_lists_the_names` |
+| 3 a bare folder works unregistered | `test_a_folder_resolves_without_being_registered` |
+| 5 the env var, and the flag beating it | `test_the_environment_variable_is_the_fallback` |
+| 7 add stores an absolute path, remove keeps the folder | `test_add_stores_an_absolute_path`, `test_remove_forgets_the_name_and_leaves_the_folder` |
+| 8 a corrupt registry reads as empty | 4 parametrised cases + `test_junk_entries_are_dropped_not_fatal` |
+| 9 two projects share nothing | `test_two_workspaces_never_share_a_database` (runs the real CLI twice) |
+| — names that could be mistaken for paths | 8 parametrised cases |
+| — a registered folder that moved | `test_a_registered_folder_that_moved_is_not_silently_repaired` |
+
+**Problems found while building, and the fixes:**
+
+- **`--workspace` didn't switch anything at first.** Reading the registry
+  imported `sellbird.paths`, which settles `PROJECT_ROOT` at import — so the
+  home was decided before the flag was applied. Caught by running the command,
+  not by a test: `workspace which` reported the checkout. Fixed by recomputing
+  `paths.PROJECT_ROOT` after setting `SELLBIRD_HOME`, which is safe only
+  because `cli.py` imports nothing from `sellbird` at module level.
+- **One of my own tests wrote to the real registry.** A leftover line called
+  `workspaces.remove("acme")` with no `path=`, which deleted the live entry I
+  had just added for the manual check. Both entries were throwaway test ones,
+  so nothing of the user's was lost. Every test now passes an explicit tmp
+  registry path.
+
+**Verified by hand, end to end:** two projects registered, `--workspace`,
+`SELLBIRD_WORKSPACE`, and the flag beating the variable all switched the home;
+a prospect inserted into one project's database was invisible to the other and
+to the checkout; an unknown name stopped the command and listed the known
+names; the `[workspace: …]` line appeared only when a workspace was named.
+
+**Regression run:** 362 passed across the dashboard, home, workspace,
+packaging and Windows suites after the change.
+
+**Found by the full suite, after the targeted runs passed:**
+`test_mcp_server.py::test_instance_needs_no_token` failed. I had added the
+workspace name *and the home folder's absolute path* to `/api/instance`, which
+is deliberately reachable with no token so a client can find the dashboard.
+The test pinned the response shape, and it was right to: an unauthenticated
+endpoint should say only enough to identify the dashboard. The name of
+somebody's project is not that, and the path to their folder certainly isn't.
+`/api/instance` is back to exactly what it was, and the tab title now comes
+from `/api/sellbird/status`, which is behind the token and already called on
+every page load. Two tests pin that: one asserts `/api/instance` has the single
+key, one asserts the authenticated route carries the name.
+
+**Regression run:** 1 failed, 3752 passed before the fix; 37 workspace tests and
+307 dashboard/MCP tests pass after it. Full suite re-run below.
