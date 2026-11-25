@@ -58,3 +58,7 @@ sellbird.yaml.*
 harvey.local.yaml
 harvey.local.yaml.*
 harvey.yaml.*
+
+# Google OAuth client files as downloaded from Cloud Console. They carry a
+# client secret; the values belong in .env (GMAIL_CLIENT_ID / _SECRET).
+client_secret*.json
