@@ -194,6 +194,76 @@ def test_accent_must_be_a_hex_colour(accent):
     assert SignatureConfig(accent=None).accent == "#e5e7eb"
 
 
+# ── branded style (build-docs/features/branded-email.md) ──
+
+COLD = "Hi Jane,\n\nWorth a look?\n\nSam\n\n1 Example Street, Springfield\nNot interested? Reply stop."
+
+
+def branded_config(logo, booking_url="https://acme.example/book", **settings):
+    cfg = footer_config(logo, style="branded", accent="#4f46e5", **settings)
+    cfg.offer = SimpleNamespace(booking_url=booking_url)
+    return cfg
+
+
+def test_ac1_branded_wraps_the_letter_in_header_card_and_dark_band(logo):
+    sig = load_signature(branded_config(logo))
+    out = render_html(COLD, sig)
+
+    strip = out.index('bgcolor="#4f46e5"')
+    header = out.index(f"cid:{sig.content_id}")
+    company = out.index(">Acme</td>")
+    letter = out.index("Worth a look?")
+    band = out.index('bgcolor="#0f172a"')
+    assert strip < header < company < letter < band
+    assert out.index("1 Example Street, Springfield<br>\nNot interested? Reply stop.") > band
+    assert "Not interested" not in out[:band]   # footer moved out of the letter
+
+
+def test_ac2_button_on_cold_email_only(logo):
+    sig = load_signature(branded_config(logo, button="Book a call <now>"))
+
+    cold = render_html(COLD, sig)
+    assert '<a href="https://acme.example/book"' in cold
+    assert "Book a call &lt;now&gt;</a>" in cold
+    assert cold.index("Book a call") < cold.index('bgcolor="#0f172a"')
+
+    reply = render_html("Hi Jane,\n\nThursday works.\n\nSam", sig)
+    assert "acme.example/book" not in reply and "Book a call" not in reply
+    assert ">Acme</div>" in reply                # band keeps the company
+
+
+def test_ac2_no_button_label_means_no_button(logo):
+    assert "acme.example/book" not in render_html(COLD, load_signature(branded_config(logo)))
+
+
+@pytest.mark.parametrize("url", ["", "http://acme.example/book", "javascript:alert(1)"])
+def test_ac3_button_without_an_https_booking_url_is_refused(logo, url):
+    cfg = branded_config(logo, booking_url=url, button="Book a call")
+    with pytest.raises(SignatureError, match="booking_url"):
+        load_signature(cfg)
+    assert "booking_url" in signature_problem(cfg)
+
+
+def test_ac3_button_is_ignored_in_letter_style(logo):
+    cfg = footer_config(logo, button="Book a call")   # no offer at all
+    assert load_signature(cfg).button == ""
+
+
+def test_ac4_style_is_letter_or_branded():
+    assert SignatureConfig().style == "letter"
+    assert SignatureConfig(style=" Branded ").style == "branded"
+    with pytest.raises(ValidationError):
+        SignatureConfig(style="fancy")
+
+
+def test_branded_without_a_company_shows_the_logo_alone(logo):
+    cfg = branded_config(logo)
+    cfg.persona.company = ""
+    out = render_html(COLD, load_signature(cfg))
+    assert "font-weight:600;color:#0f172a" not in out   # no company cell
+    assert "Not interested? Reply stop." in out
+
+
 # ── MIME (Gmail, SMTP) ──
 
 

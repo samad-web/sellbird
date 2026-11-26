@@ -139,3 +139,9 @@ to `microsoft`; persona and the email-rules sign-off use their name.
 ### 2026-11-25 — What Sellbird sells here: Auratel
 Auratel is the product, not the operator's agency. Train on Auratel's own site
 so the emails pitch it. The agency domain is only the sending identity.
+
+### 2026-11-26 — Branded email layout is opt-in
+The operator chose a full branded template (header, button, dark footer) for cold
+email after being told it raises Promotions/Spam placement and lowers replies. Built
+as `signature.style: branded`; the plain-letter default stays for everyone else.
+The button reuses `offer.booking_url` rather than a second URL setting.

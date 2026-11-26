@@ -12,6 +12,8 @@ clickable. The pre-send gate checks that text, so the only link the HTML adds
 is the logo's own ``link``, which you set. A cold email's compliance footer
 (postal address, opt-out line) is set apart under a thin rule in the
 ``accent`` colour, in small grey type; the words stay the same.
+``style: branded`` swaps the letter for a designed layout (header, card,
+booking button on cold email, dark footer band); same words, same text part.
 
 A logo that's missing, too big or not an image never lets an email go out
 without it: the sender holds the outbox (``signature_problem``) and the
@@ -53,6 +55,10 @@ class Signature:
     direction: str        # rtl, ltr or auto
     accent: str = "#e5e7eb"          # the rule above the footer
     footer: tuple[str, ...] = ()     # compliance lines a cold email ends with
+    style: str = "letter"            # or "branded"
+    company: str = ""
+    button: str = ""                 # branded: label of the booking button
+    button_url: str = ""
 
 
 def _settings(config):
@@ -91,7 +97,15 @@ def load_signature(config) -> Signature | None:
     if not size_px or not all(0 < n <= MAX_LOGO_PIXELS for n in size_px):
         raise SignatureError(f"logo {path.name} is a damaged image")
     height = round(width * size_px[1] / size_px[0])
-    company = getattr(getattr(config, "persona", None), "company", "") or ""
+    company = (getattr(getattr(config, "persona", None), "company", "") or "").strip()
+    style = getattr(settings, "style", "letter") or "letter"
+    button = (getattr(settings, "button", "") or "").strip() if style == "branded" else ""
+    button_url = ""
+    if button:
+        button_url = (getattr(getattr(config, "offer", None), "booking_url", "") or "").strip()
+        if not re.match(r"https://[^\s\"<>]+$", button_url):
+            raise SignatureError(
+                "signature.button needs offer.booking_url set to an https:// address")
     return Signature(
         data=data,
         mime=mime,
@@ -104,6 +118,10 @@ def load_signature(config) -> Signature | None:
         direction=(getattr(settings, "direction", "") or "auto").strip().lower(),
         accent=(getattr(settings, "accent", "") or "#e5e7eb").strip(),
         footer=tuple(compliance_footer_lines(config)),
+        style=style,
+        company=company,
+        button=button,
+        button_url=button_url,
     )
 
 
@@ -144,6 +162,8 @@ def render_html(body: str, sig: Signature) -> str:
         # Outlook's desktop renderer ignores dir="auto" and reads the style.
         align = "right" if sig.direction == "rtl" else "left"
         direction = f'dir="{sig.direction}" style="direction:{sig.direction};text-align:{align}"'
+    if sig.style == "branded":
+        return _branded(text, img, footer, sig, direction)
     foot = (
         f'<div style="margin-top:28px;padding-top:14px;border-top:1px solid {sig.accent};'
         f'font-size:12px;line-height:1.6;color:#64748b">{_paragraph(footer)}</div>\n'
@@ -158,6 +178,47 @@ def render_html(body: str, sig: Signature) -> str:
         f'<div style="margin-top:20px">{img}</div>\n'
         f"{foot}"
         "</div>\n</div>\n</body></html>\n"
+    )
+
+
+_FONT = "-apple-system,'Segoe UI',Helvetica,Arial,sans-serif"
+
+
+def _branded(text: str, img: str, footer: str, sig: Signature, direction: str) -> str:
+    """The branded layout, in tables so Outlook keeps it: accent strip,
+    logo and company, the letter, a booking button (cold email only), and a
+    dark band with the company and the compliance lines."""
+    a, company = sig.accent, html.escape(sig.company, quote=False)
+    name = (f'<td style="vertical-align:middle;padding-left:12px;font-size:17px;'
+            f'font-weight:600;color:#0f172a">{company}</td>' if company else "")
+    button = ""
+    if footer and sig.button:   # only a cold email ends with the footer
+        button = (
+            '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+            f'style="margin:8px 0 8px"><tr><td bgcolor="{a}" style="border-radius:8px;background:{a}">'
+            f'<a href="{html.escape(sig.button_url)}" style="display:inline-block;padding:12px 26px;'
+            'font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px">'
+            f'{html.escape(sig.button, quote=False)}</a></td></tr></table>\n'
+        )
+    band = (f'<div style="color:#ffffff;font-size:13px;font-weight:600;margin-bottom:6px">{company}</div>'
+            if company else "") + (_paragraph(footer) if footer else "")
+    return (
+        '<!DOCTYPE html>\n<html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1"></head>\n'
+        '<body style="margin:0;padding:0;background:#f1f5f9">\n'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        'bgcolor="#f1f5f9" style="background:#f1f5f9"><tr><td align="center" style="padding:32px 12px">\n'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;font-family:{_FONT}">\n'
+        f'<tr><td height="4" bgcolor="{a}" style="height:4px;line-height:4px;font-size:0;background:{a}">&nbsp;</td></tr>\n'
+        '<tr><td style="padding:22px 36px;border-bottom:1px solid #e5e7eb">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+        f'<td style="vertical-align:middle">{img}</td>{name}</tr></table></td></tr>\n'
+        '<tr><td style="padding:32px 36px 20px;font-size:15px;line-height:1.65;color:#0f172a">\n'
+        f'<div {direction}>\n{text}\n{button}</div></td></tr>\n'
+        + (f'<tr><td bgcolor="#0f172a" style="background:#0f172a;padding:24px 36px;font-size:12px;'
+           f'line-height:1.7;color:#94a3b8">{band}</td></tr>\n' if band else "")
+        + '</table>\n</td></tr></table>\n</body></html>\n'
     )
 
 

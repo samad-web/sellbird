@@ -5,6 +5,11 @@ What was built, fixed and committed, per feature. The product-facing changelog i
 
 ## Unreleased
 
+- 2026-11-26 — **Branded email style** (`signature.style: branded`). Opt-in
+  layout: accent strip, logo + company header, the letter, a booking button on
+  cold emails (`signature.button` → `offer.booking_url`), dark footer band.
+  Default `letter` unchanged. Design: `features/branded-email.md`.
+
 - 2026-11-25 — **Signature footer** (`sellbird/integrations/signature.py`). With a
   logo set, a cold email's compliance footer sits under the logo behind a thin
   `accent`-coloured rule, in small grey type; body type refined (15px, 560px

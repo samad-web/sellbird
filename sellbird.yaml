@@ -97,6 +97,8 @@ channels:
       link: ""                  # optional web address the logo opens
       direction: "auto"         # rtl for Hebrew or Arabic email
       accent: "#e5e7eb"         # colour of the thin rule above a cold email's footer
+      style: "letter"           # or "branded": header, card, dark footer band (more Promotions)
+      button: ""                # branded: button label, opens offer.booking_url (cold email only)
   linkedin:
     enabled: false             # explicit opt-in; credentials alone do not enable it
     max_daily_connections: 20

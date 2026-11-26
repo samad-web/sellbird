@@ -226,8 +226,10 @@ class SignatureConfig(BaseModel):
     link: str = ""            # optional https:// address the logo opens
     direction: str = "auto"   # "rtl" for Hebrew or Arabic email, "ltr", or "auto"
     accent: str = "#e5e7eb"   # #RRGGBB of the thin rule above a cold email's footer
+    style: str = "letter"     # "letter", or "branded": header, button, dark footer band
+    button: str = ""          # branded only: label of a button to offer.booking_url
 
-    @field_validator("logo", "alt", "link", mode="before")
+    @field_validator("logo", "alt", "link", "button", mode="before")
     @classmethod
     def _blank_is_empty(cls, v):
         return "" if v is None else str(v).strip()
@@ -252,6 +254,14 @@ class SignatureConfig(BaseModel):
         v = (str(v) if v is not None else "").strip() or "#e5e7eb"
         if not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
             raise ValueError(f"signature.accent '{v}' must be a colour like #4f46e5.")
+        return v
+
+    @field_validator("style", mode="before")
+    @classmethod
+    def _known_style(cls, v):
+        v = (str(v) if v is not None else "").strip().lower() or "letter"
+        if v not in ("letter", "branded"):
+            raise ValueError("signature.style must be letter or branded.")
         return v
 
     @field_validator("direction", mode="before")

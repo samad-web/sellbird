@@ -267,3 +267,12 @@ first run, renamed. Full suite: 3789 passed, 192 skipped.
   `test_reply_without_the_footer_has_no_rule`; AC3
   `test_footer_text_mid_body_is_left_alone`; AC4 `test_accent_must_be_a_hex_colour`.
 - `tests/test_signature.py`, `test_microsoft.py`, `test_config.py`: 116 passed.
+
+## Branded email style (2026-11-26)
+
+- AC1 `test_ac1_branded_wraps_the_letter_in_header_card_and_dark_band`; AC2
+  `test_ac2_button_on_cold_email_only`, `test_ac2_no_button_label_means_no_button`; AC3
+  `test_ac3_button_without_an_https_booking_url_is_refused` (blank, http, javascript:),
+  `test_ac3_button_is_ignored_in_letter_style`; AC4 `test_ac4_style_is_letter_or_branded`;
+  edge `test_branded_without_a_company_shows_the_logo_alone`.
+- `tests/test_signature.py`, `test_microsoft.py`, `test_config.py`: 125 passed. No failures found.
