@@ -116,6 +116,8 @@ Wants=network-online.target
 [Service]
 User=${APP_USER}
 WorkingDirectory=${APP_DIR}
+# claude is installed per user (step 1 below); the service needs it on PATH.
+Environment=PATH=${HOME_DIR}/.npm-global/bin:${APP_DIR}/.venv/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=${APP_DIR}/.venv/bin/sellbird serve --url https://${DOMAIN} --port ${PORT}
 Restart=on-failure
 RestartSec=5
@@ -123,7 +125,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=${APP_DIR}
+# The whole home, not just the app: claude keeps its session in ~/.claude
+# and ~/.claude.json, and a read-only copy fails every call.
+ReadWritePaths=${HOME_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -139,8 +143,9 @@ cat <<NEXT
 
   1. Sign in to Claude, which is what Sellbird thinks with:
          sudo -u ${APP_USER} -i
-         npm install -g @anthropic-ai/claude-code    # if it isn't there
-         claude login                                # prints a URL to open
+         npm config set prefix ~/.npm-global         # the path the service uses
+         npm install -g @anthropic-ai/claude-code
+         ~/.npm-global/bin/claude auth login         # prints a URL to open
 
   2. Set the operator password (asked twice, never an argument):
          sudo -u ${APP_USER} ${APP_DIR}/.venv/bin/sellbird server set-password

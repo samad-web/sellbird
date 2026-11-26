@@ -280,3 +280,12 @@ first run, renamed. Full suite: 3789 passed, 192 skipped.
   (it's `config.product.offer`); tests used a fake config with the wrong shape, so a live
   send found it. Fixed the path; tests now build `product.offer` and
   `test_button_reads_the_booking_url_from_the_real_config_shape` pins the real shape.
+
+## Deploy script service unit (2026-11-26)
+- `bash -n deploy/install.sh`: syntax OK. There's no unit test for the script.
+- Live check on a shared Ubuntu 24.04 server, with the same unit settings set by hand:
+  - the service starts, and `/login` returns 200;
+  - `claude -p` run under `systemd-run` with the unit's sandbox (ProtectHome=read-only,
+    ReadWritePaths=home, ProtectSystem=full, PrivateTmp, NoNewPrivileges) answers.
+- Not covered: install.sh still assumes Caddy. On a server already running nginx it
+  must not run as-is. Set up an nginx site and `certbot --nginx` by hand.

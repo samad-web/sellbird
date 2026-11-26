@@ -5,6 +5,12 @@ What was built, fixed and committed, per feature. The product-facing changelog i
 
 ## Unreleased
 
+- 2026-11-26 — **fix(deploy):** `install.sh` now writes a service that can run
+  `claude`. The CLI is put on the unit's PATH (`~/.npm-global/bin`), and
+  `ReadWritePaths` covers the whole home, because claude writes `~/.claude` and
+  `~/.claude.json`. The sign-in hint now says `npm config set prefix` and
+  `claude auth login`.
+
 - 2026-11-26 — **Branded email style** (`signature.style: branded`). Opt-in
   layout: accent strip, logo + company header, the letter, a booking button on
   cold emails (`signature.button` → `product.offer.booking_url`), dark footer band.
