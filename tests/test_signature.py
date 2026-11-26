@@ -154,6 +154,46 @@ def test_html_logo_direction_and_link(logo):
     assert 'dir="auto"' in render_html("hi", load_signature(config(logo=str(logo))))
 
 
+def footer_config(logo, **settings):
+    from sellbird.config import ComplianceConfig
+    cfg = config(logo=str(logo), **settings)
+    cfg.compliance = ComplianceConfig(postal_address="1 Example Street, Springfield",
+                                      opt_out_line="Not interested? Reply stop.")
+    return cfg
+
+
+def test_cold_footer_sits_under_the_logo_behind_a_rule(logo):
+    sig = load_signature(footer_config(logo, accent="#4F46E5"))
+    body = "Hi Jane,\n\nBook here: https://acme.example/start\n\nSam\n\n" \
+           "1 Example Street, Springfield\nNot interested? Reply stop."
+    out = render_html(body, sig)
+
+    img_at = out.index(f"cid:{sig.content_id}")
+    foot_at = out.index("border-top:1px solid #4F46E5")
+    assert img_at < foot_at < out.index("1 Example Street, Springfield<br>\nNot interested? Reply stop.")
+    assert out.count("Not interested?") == 1                 # moved, not copied
+    assert out.count('<p style="margin:0 0 1em 0">') == 3    # footer isn't a body paragraph
+
+
+def test_reply_without_the_footer_has_no_rule(logo):
+    out = render_html("Thanks Jane, Tuesday works.\n\nSam",
+                      load_signature(footer_config(logo)))
+    assert "border-top" not in out and "Tuesday works." in out
+
+
+def test_footer_text_mid_body_is_left_alone(logo):
+    body = "1 Example Street, Springfield\nNot interested? Reply stop.\n\nSam"
+    out = render_html(body, load_signature(footer_config(logo)))
+    assert "border-top" not in out
+
+
+@pytest.mark.parametrize("accent", ["red", "#4f46e", "#4f46e5;x:y", "url(x)"])
+def test_accent_must_be_a_hex_colour(accent):
+    with pytest.raises(ValidationError):
+        SignatureConfig(accent=accent)
+    assert SignatureConfig(accent=None).accent == "#e5e7eb"
+
+
 # ── MIME (Gmail, SMTP) ──
 
 

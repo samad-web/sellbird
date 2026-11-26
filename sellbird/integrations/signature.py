@@ -9,7 +9,9 @@ Gmail and SMTP also carry the same plain text as the HTML's alternative.
 The words are the ones Sellbird wrote, unchanged: the HTML is that text,
 escaped, with its paragraphs and line breaks kept and its web addresses made
 clickable. The pre-send gate checks that text, so the only link the HTML adds
-is the logo's own ``link``, which you set.
+is the logo's own ``link``, which you set. A cold email's compliance footer
+(postal address, opt-out line) is set apart under a thin rule in the
+``accent`` colour, in small grey type; the words stay the same.
 
 A logo that's missing, too big or not an image never lets an email go out
 without it: the sender holds the outbox (``signature_problem``) and the
@@ -23,6 +25,7 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
 
+from sellbird.config import compliance_footer_lines
 from sellbird.paths import PROJECT_ROOT
 
 # Bigger images hurt deliverability, and a logo never needs more.
@@ -48,6 +51,8 @@ class Signature:
     alt: str
     link: str
     direction: str        # rtl, ltr or auto
+    accent: str = "#e5e7eb"          # the rule above the footer
+    footer: tuple[str, ...] = ()     # compliance lines a cold email ends with
 
 
 def _settings(config):
@@ -97,6 +102,8 @@ def load_signature(config) -> Signature | None:
         alt=(getattr(settings, "alt", "") or company or "logo").strip(),
         link=(getattr(settings, "link", "") or "").strip(),
         direction=(getattr(settings, "direction", "") or "auto").strip().lower(),
+        accent=(getattr(settings, "accent", "") or "#e5e7eb").strip(),
+        footer=tuple(compliance_footer_lines(config)),
     )
 
 
@@ -111,8 +118,15 @@ def signature_problem(config) -> str:
 
 
 def render_html(body: str, sig: Signature) -> str:
-    """The email as HTML: Sellbird's text, then the logo."""
-    paragraphs = [p for p in re.split(r"\n[ \t]*\n", body.replace("\r\n", "\n").strip()) if p.strip()]
+    """The email as HTML: Sellbird's text, the logo, then the cold-email
+    footer under a rule. Replies have no footer, so they end at the logo."""
+    body = body.replace("\r\n", "\n").strip()
+    footer = "\n".join(sig.footer)
+    if footer and body.endswith("\n" + footer):
+        body = body[: -len(footer)].rstrip()
+    else:
+        footer = ""
+    paragraphs = [p for p in re.split(r"\n[ \t]*\n", body) if p.strip()]
     text = "\n".join(
         f'<p style="margin:0 0 1em 0">{_paragraph(p)}</p>' for p in paragraphs
     )
@@ -130,12 +144,19 @@ def render_html(body: str, sig: Signature) -> str:
         # Outlook's desktop renderer ignores dir="auto" and reads the style.
         align = "right" if sig.direction == "rtl" else "left"
         direction = f'dir="{sig.direction}" style="direction:{sig.direction};text-align:{align}"'
+    foot = (
+        f'<div style="margin-top:28px;padding-top:14px;border-top:1px solid {sig.accent};'
+        f'font-size:12px;line-height:1.6;color:#64748b">{_paragraph(footer)}</div>\n'
+        if footer else ""
+    )
     return (
         '<!DOCTYPE html>\n<html><head><meta charset="utf-8"></head><body>\n'
         f'<div {direction}>\n'
-        '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">\n'
+        '<div style="max-width:560px;font-family:-apple-system,\'Segoe UI\',Helvetica,Arial,'
+        'sans-serif;font-size:15px;line-height:1.6;color:#0f172a">\n'
         f"{text}\n"
-        f'<div style="margin-top:1.5em">{img}</div>\n'
+        f'<div style="margin-top:20px">{img}</div>\n'
+        f"{foot}"
         "</div>\n</div>\n</body></html>\n"
     )
 

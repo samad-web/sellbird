@@ -225,6 +225,7 @@ class SignatureConfig(BaseModel):
     alt: str = ""             # shown when images are off; empty → persona.company
     link: str = ""            # optional https:// address the logo opens
     direction: str = "auto"   # "rtl" for Hebrew or Arabic email, "ltr", or "auto"
+    accent: str = "#e5e7eb"   # #RRGGBB of the thin rule above a cold email's footer
 
     @field_validator("logo", "alt", "link", mode="before")
     @classmethod
@@ -243,6 +244,14 @@ class SignatureConfig(BaseModel):
     def _web_link(cls, v: str) -> str:
         if v and not re.match(r"https?://[^\s\"<>]+$", v):
             raise ValueError(f"signature.link '{v}' must be a web address (https://...).")
+        return v
+
+    @field_validator("accent", mode="before")
+    @classmethod
+    def _hex_colour(cls, v):
+        v = (str(v) if v is not None else "").strip() or "#e5e7eb"
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
+            raise ValueError(f"signature.accent '{v}' must be a colour like #4f46e5.")
         return v
 
     @field_validator("direction", mode="before")

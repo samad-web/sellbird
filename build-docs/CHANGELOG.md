@@ -5,6 +5,11 @@ What was built, fixed and committed, per feature. The product-facing changelog i
 
 ## Unreleased
 
+- 2026-11-25 — **Signature footer** (`sellbird/integrations/signature.py`). With a
+  logo set, a cold email's compliance footer sits under the logo behind a thin
+  `accent`-coloured rule, in small grey type; body type refined (15px, 560px
+  column). Design: `features/signature-footer.md`.
+
 - 2026-11-25 — **CSV import** (`sellbird import`, `sellbird/importer.py`). Loads a
   lead list as companies + `new` prospects; addresses graded by the verifier, not the
   file; dedup in-file and against the DB; `--dry-run`. Design: `features/csv-import.md`.

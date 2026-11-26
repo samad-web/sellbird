@@ -260,3 +260,10 @@ first run, renamed. Full suite: 3789 passed, 192 skipped.
 
 - `tests/test_importer.py`: 8 tests, one per acceptance criterion (AC1–AC7) plus the row cap. All pass.
 - Found while writing them: async fixtures need `pytest_asyncio.fixture` (strict mode). Fixed in the test setup, not the feature.
+
+## Signature footer (2026-11-25)
+
+- AC1 `test_cold_footer_sits_under_the_logo_behind_a_rule`; AC2
+  `test_reply_without_the_footer_has_no_rule`; AC3
+  `test_footer_text_mid_body_is_left_alone`; AC4 `test_accent_must_be_a_hex_colour`.
+- `tests/test_signature.py`, `test_microsoft.py`, `test_config.py`: 116 passed.
