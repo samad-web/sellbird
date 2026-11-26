@@ -227,7 +227,7 @@ class SignatureConfig(BaseModel):
     direction: str = "auto"   # "rtl" for Hebrew or Arabic email, "ltr", or "auto"
     accent: str = "#e5e7eb"   # #RRGGBB of the thin rule above a cold email's footer
     style: str = "letter"     # "letter", or "branded": header, button, dark footer band
-    button: str = ""          # branded only: label of a button to offer.booking_url
+    button: str = ""          # branded only: label of a button to product.offer.booking_url
 
     @field_validator("logo", "alt", "link", "button", mode="before")
     @classmethod

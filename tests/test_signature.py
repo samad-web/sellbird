@@ -201,8 +201,16 @@ COLD = "Hi Jane,\n\nWorth a look?\n\nSam\n\n1 Example Street, Springfield\nNot i
 
 def branded_config(logo, booking_url="https://acme.example/book", **settings):
     cfg = footer_config(logo, style="branded", accent="#4f46e5", **settings)
-    cfg.offer = SimpleNamespace(booking_url=booking_url)
+    from sellbird.config import OfferConfig
+    cfg.product = SimpleNamespace(offer=OfferConfig(booking_url=booking_url))
     return cfg
+
+
+def test_button_reads_the_booking_url_from_the_real_config_shape(logo):
+    """config.product.offer, as SellbirdConfig has it (not config.offer)."""
+    from sellbird.config import SellbirdConfig
+    assert "offer" in SellbirdConfig.model_fields["product"].annotation.model_fields
+    assert "offer" not in SellbirdConfig.model_fields
 
 
 def test_ac1_branded_wraps_the_letter_in_header_card_and_dark_band(logo):

@@ -102,10 +102,11 @@ def load_signature(config) -> Signature | None:
     button = (getattr(settings, "button", "") or "").strip() if style == "branded" else ""
     button_url = ""
     if button:
-        button_url = (getattr(getattr(config, "offer", None), "booking_url", "") or "").strip()
+        offer = getattr(getattr(config, "product", None), "offer", None)
+        button_url = (getattr(offer, "booking_url", "") or "").strip()
         if not re.match(r"https://[^\s\"<>]+$", button_url):
             raise SignatureError(
-                "signature.button needs offer.booking_url set to an https:// address")
+                "signature.button needs product.offer.booking_url set to an https:// address")
     return Signature(
         data=data,
         mime=mime,

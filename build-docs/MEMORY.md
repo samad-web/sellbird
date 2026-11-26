@@ -144,4 +144,4 @@ so the emails pitch it. The agency domain is only the sending identity.
 The operator chose a full branded template (header, button, dark footer) for cold
 email after being told it raises Promotions/Spam placement and lowers replies. Built
 as `signature.style: branded`; the plain-letter default stays for everyone else.
-The button reuses `offer.booking_url` rather than a second URL setting.
+The button reuses `product.offer.booking_url` rather than a second URL setting.

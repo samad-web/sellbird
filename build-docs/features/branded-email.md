@@ -10,7 +10,7 @@
 
 ## Architecture
 - `SignatureConfig.style` (`letter` | `branded`) and `SignatureConfig.button` (label, blank = no button).
-- The button opens `offer.booking_url` (one booking link, not a second copy in the signature).
+- The button opens `product.offer.booking_url` (one booking link, not a second copy in the signature).
 - `render_html` picks the layout. Branded, built from tables so Outlook keeps it:
   - grey canvas, white 600px card;
   - 4px `accent` strip;
@@ -27,7 +27,7 @@
 - Sender outbox hold (`signature_problem`): a button with no usable booking URL holds the outbox, like an unusable logo.
 
 ## Edge cases
-- Button set, `offer.booking_url` blank or not https → `SignatureError`, outbox held, reason shown on Today.
+- Button set, `product.offer.booking_url` blank or not https → `SignatureError`, outbox held, reason shown on Today.
 - Reply (no compliance footer at the end) → no button; footer band shows the company only.
 - Blank company → header shows the logo alone, no company line in the band.
 - Label, company and footer text are HTML-escaped.

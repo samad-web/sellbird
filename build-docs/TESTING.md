@@ -276,3 +276,7 @@ first run, renamed. Full suite: 3789 passed, 192 skipped.
   `test_ac3_button_is_ignored_in_letter_style`; AC4 `test_ac4_style_is_letter_or_branded`;
   edge `test_branded_without_a_company_shows_the_logo_alone`.
 - `tests/test_signature.py`, `test_microsoft.py`, `test_config.py`: 125 passed. No failures found.
+- Fix (2026-11-26): the button read `config.offer`, which `SellbirdConfig` doesn't have
+  (it's `config.product.offer`); tests used a fake config with the wrong shape, so a live
+  send found it. Fixed the path; tests now build `product.offer` and
+  `test_button_reads_the_booking_url_from_the_real_config_shape` pins the real shape.
