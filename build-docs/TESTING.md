@@ -295,3 +295,9 @@ first run, renamed. Full suite: 3789 passed, 192 skipped.
   A throwaway account worked through nginx with curl, which sends cookies, so the fault was in the page.
 - `test_hosted_page_without_a_token_sends_its_session_cookie` fails before the fix and passes after.
 - Regression: all server and dashboard test files pass (483 passed, 10 skipped).
+
+## SMTP reply read fails closed (2026-11-26)
+- New in `tests/test_audit_fixes.py`: IMAP login failure and unreachable server raise;
+  a refused SELECT/SEARCH/FETCH raises and marks nothing read; an expunged message is
+  skipped; the handler reports the IMAP failure as a failed read (`_run_native() is False`).
+- `test_imap_login_failure_raises_so_sending_holds` fails before the fix (returned `[]`).

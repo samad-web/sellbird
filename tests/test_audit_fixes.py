@@ -189,6 +189,70 @@ def test_a_failure_to_mark_read_never_raises(monkeypatch):
     provider.confirm_read()         # must not raise
 
 
+@pytest.mark.asyncio
+async def test_imap_login_failure_raises_so_sending_holds(monkeypatch):
+    """Returning [] here read as "no replies", so follow-ups kept going to
+    people who had replied. Gmail and Graph raise; SMTP must too."""
+    import imaplib
+    imap = FakeIMAP({b"1": _raw()})
+
+    def refuse(user, password):
+        raise imaplib.IMAP4.error("[AUTHENTICATIONFAILED] Invalid credentials")
+    imap.login = refuse
+    provider = _provider(monkeypatch, imap)
+    with pytest.raises(imaplib.IMAP4.error, match="AUTHENTICATIONFAILED"):
+        await provider.get_replies()
+    assert imap.logged_out
+
+
+@pytest.mark.asyncio
+async def test_imap_unreachable_raises(monkeypatch):
+    provider = _provider(monkeypatch, FakeIMAP({}))
+
+    def unreachable(host, port):
+        raise OSError("connection refused")
+    monkeypatch.setattr("imaplib.IMAP4_SSL", unreachable)
+    with pytest.raises(OSError):
+        await provider.get_replies()
+
+
+@pytest.mark.parametrize("step", ["select", "search", "fetch"])
+def test_imap_refused_step_raises_instead_of_a_partial_read(monkeypatch, step):
+    imap = FakeIMAP({b"1": _raw()})
+    setattr(imap, step, lambda *_a, **_k: ("NO", [b"refused"]))
+    provider = _provider(monkeypatch, imap)
+    with pytest.raises(Exception, match="couldn't"):
+        provider._fetch_unseen(50)
+    provider.confirm_read()
+    assert imap.seen == set()          # nothing marked read on a failed read
+
+
+def test_imap_message_expunged_after_search_is_skipped(monkeypatch):
+    imap = FakeIMAP({b"1": _raw(), b"2": _raw(message_id="<b@example.com>")})
+    real_fetch = imap.fetch
+    imap.fetch = lambda msg_id, parts: ("OK", [None]) if msg_id == b"1" else real_fetch(msg_id, parts)
+    provider = _provider(monkeypatch, imap)
+    assert [m.message_id for m in provider._fetch_unseen(50)] == ["<b@example.com>"]
+
+
+@pytest.mark.asyncio
+async def test_handler_treats_an_imap_failure_as_a_failed_read(monkeypatch, tmp_path):
+    """End to end: the handler reports the read failed, which holds sending."""
+    import imaplib
+    from sellbird.state import StateManager
+    from tests.test_outbox_native import make_handler
+    state = StateManager(str(tmp_path / "imap.db"))
+    await state.init_db()
+    imap = FakeIMAP({})
+
+    def refuse(user, password):
+        raise imaplib.IMAP4.error("[AUTHENTICATIONFAILED] Invalid credentials")
+    imap.login = refuse
+    handler = make_handler(state, _provider(monkeypatch, imap))
+    assert await handler._run_native() is False
+    assert "AUTHENTICATIONFAILED" in handler.last_read_problem
+
+
 def test_two_replies_in_one_thread_without_message_ids_stay_distinct(monkeypatch):
     """Finding 16: "{sender}:{subject}" collided, so the second was dropped —
     and the second message is usually the one that says yes."""

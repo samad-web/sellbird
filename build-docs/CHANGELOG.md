@@ -5,6 +5,12 @@ What was built, fixed and committed, per feature. The product-facing changelog i
 
 ## Unreleased
 
+- 2026-11-26 — **fix(smtp-replies):** a failed IMAP read now raises instead of
+  returning no replies, as Gmail and Microsoft already did, so the heartbeat holds
+  sending that cycle. Before, a wrong password or an unreachable IMAP server read as
+  "nobody replied", and follow-ups could go to people who had. A refused SELECT,
+  SEARCH or FETCH raises too; a message expunged mid-read is still skipped.
+
 - 2026-11-26 — **fix(hosted-signin):** a hosted dashboard's API calls now send the
   session cookie (`credentials: 'same-origin'` when no token is attached). Before,
   `authFetch` always omitted credentials, so sign-in succeeded and every API call

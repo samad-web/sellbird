@@ -143,12 +143,10 @@ class SmtpImapProvider(MailProvider):
         return SendResult(ok=True, message_id=message_id, thread_ref=message_id)
 
     async def get_replies(self, limit: int = 50) -> list[InboundMessage]:
+        """The unseen inbox, or raise, like Gmail and Graph: an unread reply
+        can't have stopped its follow-ups, so a failed read holds sending."""
         loop = asyncio.get_event_loop()
-        try:
-            return await loop.run_in_executor(None, self._fetch_unseen, limit)
-        except Exception as e:
-            logger.error(f"IMAP fetch failed: {e}")
-            return []
+        return await loop.run_in_executor(None, self._fetch_unseen, limit)
 
     def _fetch_unseen(self, limit: int) -> list[InboundMessage]:
         """Read the unseen inbox WITHOUT consuming it.
@@ -166,15 +164,19 @@ class SmtpImapProvider(MailProvider):
         conn = imaplib.IMAP4_SSL(self.imap_host, self.imap_port)
         try:
             conn.login(self.imap_user, self.imap_pass)
-            conn.select("INBOX")
+            status, _ = conn.select("INBOX")
+            if status != "OK":
+                raise imaplib.IMAP4.error(f"couldn't open INBOX ({status})")
             status, data = conn.search(None, "UNSEEN")
             if status != "OK":
-                return []
+                raise imaplib.IMAP4.error(f"couldn't search the inbox ({status})")
             ids = data[0].split()[-limit:]
             for msg_id in ids:
                 status, parts = conn.fetch(msg_id, "(BODY.PEEK[])")
-                if status != "OK" or not parts or not isinstance(parts[0], tuple):
-                    continue
+                if status != "OK":
+                    raise imaplib.IMAP4.error(f"couldn't read message {msg_id!r} ({status})")
+                if not parts or not isinstance(parts[0], tuple):
+                    continue  # expunged since the search
                 parsed = self._parse_rfc822(parts[0][1], uid=msg_id)
                 if parsed:
                     out.append(parsed)
