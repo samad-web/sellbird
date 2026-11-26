@@ -63,7 +63,10 @@ function authFetch(path, opts) {
   if (token) headers.set('Authorization', 'Bearer ' + token);
   o.headers = headers;
   o.mode = 'same-origin';
-  o.credentials = 'omit';
+  // A local dashboard authorises with the token, so it sends no cookies. A
+  // hosted one (sellbird serve) has no token: its session cookie is the
+  // credential, and leaving it out signs the operator straight back out.
+  o.credentials = token ? 'omit' : 'same-origin';
   o.cache = 'no-store';
   o.redirect = 'error';
   // Not 'no-referrer': per the Fetch spec that makes a POST's Origin "null"

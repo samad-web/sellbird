@@ -5,6 +5,11 @@ What was built, fixed and committed, per feature. The product-facing changelog i
 
 ## Unreleased
 
+- 2026-11-26 — **fix(hosted-signin):** a hosted dashboard's API calls now send the
+  session cookie (`credentials: 'same-origin'` when no token is attached). Before,
+  `authFetch` always omitted credentials, so sign-in succeeded and every API call
+  bounced back to `/login`. The local, token-based dashboard is unchanged.
+
 - 2026-11-26 — **fix(deploy):** `install.sh` now writes a service that can run
   `claude`. The CLI is put on the unit's PATH (`~/.npm-global/bin`), and
   `ReadWritePaths` covers the whole home, because claude writes `~/.claude` and

@@ -839,6 +839,14 @@ def test_bad_fragment_is_stripped_but_not_stored():
     assert out["call"]["auth"] is None
 
 
+def test_hosted_page_without_a_token_sends_its_session_cookie():
+    # sellbird serve signs in with a cookie and never has a token; omitting
+    # credentials there bounced every API call to the sign-in page.
+    out = _node("")
+    assert out["call"]["auth"] is None
+    assert out["call"]["mode"] == "same-origin" and out["call"]["credentials"] == "same-origin"
+
+
 def test_token_is_never_sent_off_origin():
     out = _node("#token=" + "T" * 43)
     assert out["urls"] == ["http://127.0.0.1:5555/api/x", None, None, None, None, None,

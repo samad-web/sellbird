@@ -289,3 +289,9 @@ first run, renamed. Full suite: 3789 passed, 192 skipped.
     ReadWritePaths=home, ProtectSystem=full, PrivateTmp, NoNewPrivileges) answers.
 - Not covered: install.sh still assumes Caddy. On a server already running nginx it
   must not run as-is. Set up an nginx site and `certbot --nginx` by hand.
+
+## Hosted sign-in keeps its session (2026-11-26)
+- Found live: POST /api/login returned 200, then every API call returned 401 `signin_required`.
+  A throwaway account worked through nginx with curl, which sends cookies, so the fault was in the page.
+- `test_hosted_page_without_a_token_sends_its_session_cookie` fails before the fix and passes after.
+- Regression: all server and dashboard test files pass (483 passed, 10 skipped).
